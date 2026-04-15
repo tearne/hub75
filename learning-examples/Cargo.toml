@@ -1,0 +1,17 @@
+[package]
+name = "learning-examples"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+embedded-hal = "1.0"
+panic-halt = "1.0"
+panic-probe = { version = "0.3", features = ["print-defmt"] }
+defmt = "0.3"
+defmt-rtt = "0.4"
+rp235x-hal = { version = "0.3", features = ["rt", "critical-section-impl"] }
+pio = "0.2"
+smart-leds-trait = "0.3"
+heapless = "0.8"

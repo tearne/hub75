@@ -1,0 +1,9 @@
+[package]
+name = "hub75-client"
+version = "0.1.0"
+edition = "2021"
+description = "Host-side client for sending frames to a HUB75 display over USB serial"
+
+[dependencies]
+serialport = { version = "4", default-features = false }
+chrono = "0.4"

@@ -1,0 +1,9 @@
+[workspace]
+members = ["learning-examples", "usb-display/firmware"]
+exclude = ["usb-display/client/rust"]
+resolver = "2"
+
+[profile.release]
+opt-level = "s"
+debug = true
+lto = true

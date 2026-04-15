@@ -1,0 +1,18 @@
+[package]
+name = "usb-display-firmware"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread", "defmt"] }
+embassy-time = { version = "0.5" }
+embassy-rp = { version = "0.10", features = ["rp235xa", "defmt", "time-driver", "critical-section-impl", "unstable-pac"] }
+pio = "0.3"
+embassy-usb = { version = "0.6", features = ["defmt"] }
+embassy-futures = "0.1"
+static_cell = "2"
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+defmt = "0.3"
+defmt-rtt = "0.4"
+panic-probe = { version = "0.3", features = ["print-defmt"] }
