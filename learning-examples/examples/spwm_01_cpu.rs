@@ -1,8 +1,23 @@
-//! # DP3364S S-PWM HUB75 Driver — Minimal Working Example
+//! # DP3364S S-PWM — Step 1: CPU Bit-Bang
 //!
-//! Drives a 64×128 HUB75 LED panel using DP3364S S-PWM driver chips on the
-//! Pimoroni Interstate 75 W (RP2350A). Cycles through solid colours and
-//! brightness levels to demonstrate full RGB + greyscale control.
+//! First in a four-part progression (`spwm_01` → `spwm_04`) that
+//! incrementally moves panel driving from CPU to PIO + DMA hardware:
+//!
+//! | Example              | What the CPU does              | What hardware does         |
+//! |----------------------|--------------------------------|----------------------------|
+//! | **01_cpu (this)**    | Everything                     | —                          |
+//! | 02_pio_data          | VSYNC/PRE_ACT/WR_CFG + scan   | DATA_LATCH via PIO+DMA     |
+//! | 03_pio_commands      | Scan (display_loop)            | All 4 commands via PIO+DMA |
+//! | 04_pio_scan          | Pack buffers, kick DMA         | Commands + scan (two SMs)  |
+//!
+//! This first step bit-bangs every signal — CLK, LAT, RGB data, ADDR,
+//! OE — directly from the CPU via SIO register writes. No PIO, no
+//! DMA. It exists to document the DP3364S protocol in the clearest
+//! possible form, without any hardware abstraction hiding the details.
+//!
+//! Drives a 64×128 HUB75 LED panel using DP3364S S-PWM driver chips on
+//! the Pimoroni Interstate 75 W (RP2350A). Cycles through solid colours
+//! and brightness levels to demonstrate full RGB + greyscale control.
 //!
 //! ## Background
 //!
@@ -116,7 +131,7 @@
 //! ## Run
 //!
 //! ```sh
-//! cargo run --release --example minimal_spwm_cpu
+//! cargo run --release --example spwm_01_cpu
 //! ```
 
 #![no_std]

@@ -1,92 +1,51 @@
-//! # DP3364S S-PWM — Dual PIO State Machines (Data + Scan)
+//! # DP3364S S-PWM — Step 4: Scan via Second PIO State Machine
 //!
-//! Fourth-stage implementation of the DP3364S driver. Where
-//! `minimal_spwm_pio.rs` kept the CPU bit-banging ROW + CLK in
-//! `display_loop`, this example moves that work to a second PIO
-//! state machine. All of the panel wiggling — data commands *and*
-//! row scanning — happens inside PIO. The CPU's job is reduced to:
-//! packing the frame buffer and kicking two DMA transfers per
-//! frame.
+//! Final step in the four-part progression. Builds on
+//! `spwm_03_pio_commands.rs`.
 //!
-//! ## What changed vs. `minimal_spwm_pio`
+//! **What this step adds:** a second PIO state machine (SM1) drives
+//! the display scan loop — CLK, ADDR (row select), and OE (row
+//! pulse). The CPU no longer bit-bangs any panel signals. Its only
+//! job is packing the frame buffer and kicking two DMA transfers.
 //!
-//! `display_loop` (CPU-bitbanged ROW + CLK) was ~1.4 ms per frame —
-//! about 35 % of frame time. More importantly, because CLK is shared
-//! between the data commands and the scan phase, `display_loop`
-//! forced a pin-function flip twice per frame. Moving scan to a
-//! second PIO state machine:
+//! **Key challenge: shared CLK pin.** SM0 (data) and SM1 (scan)
+//! both need GPIO 11 (CLK). The RP2350 PIO retains an SM's
+//! output-enable even when the SM is disabled — simply calling
+//! `disable_sm()` does NOT release the pin. The idle SM continues
+//! to contend on CLK, corrupting the active SM's output.
 //!
-//!   - keeps every HUB75 pin under PIO0 for the program's lifetime
-//!   - frees the CPU during the scan phase (it can prep the next
-//!     frame's buffer, handle USB, etc.)
-//!   - runs the scan CLK at the chip's full 25 MHz rate (about 40 %
-//!     faster than the bit-banged version)
-//!
-//! ## Two state machines, one clock line
+//! **Fix: explicit pindir handover.** Before disabling an SM, we
+//! force-execute `set pindirs, 0` via the SMx_INSTR register to
+//! release CLK's output-enable. Before enabling, we force-execute
+//! `set pindirs, N` to reclaim it. Since CLK is a sideset pin (not
+//! in the SET range), this requires temporarily modifying PINCTRL
+//! to redirect SET_BASE, executing the instruction, then restoring.
 //!
 //! ```text
-//!   SM0 (data):   RGB (0–5)  ────►┐
-//!                 CLK (11)   ─────┼──► panel
-//!                 LAT (12)   ─────┤
-//!                                 │
-//!   SM1 (scan):   CLK (11)   ─────┤
-//!                 ADDR (6–10) ────┤
-//!                 OE (13)    ─────┘
+//!   SM0 (data):   RGB (0–5), CLK (11), LAT (12)
+//!   SM1 (scan):   ADDR (6–10), CLK (11), OE (13)
+//!                              ▲
+//!                     shared — pindir handover required
 //! ```
-//!
-//! Both SMs drive CLK. The RP2350's pad logic ORs the outputs and
-//! output-enables of every peripheral driving a given pin, so as
-//! long as only one of the two SMs is *actively* toggling CLK, the
-//! stalled one (sideset held at CLK = 0) contributes a constant 0
-//! and effectively gets out of the way:
-//!
-//!   - While SM0 runs data commands, SM1 is stalled at its first
-//!     `out pins, 5` (empty FIFO), sideset = 0. SM0 owns CLK.
-//!   - While SM1 runs scan iterations, SM0 is stalled at its wrap
-//!     target, sideset = 0. SM1 owns CLK.
-//!
-//! The CPU serialises the two phases: data DMA is fully drained
-//! before the scan DMA is kicked. No PIO-level IRQ handshake is
-//! needed for this first cut (that's the next step — full
-//! autonomous scanning via chained DMA).
-//!
-//! SM0 also ends each command with `mov pins, null side 0b00` so
-//! that when it stalls the RGB lines settle to 0 rather than
-//! holding whatever the last pixel value was.
 //!
 //! ## SM1 scan program
 //!
-//! One 32-bit word per scan iteration, packed as:
+//! Four phases per row, matching the CPU `display_loop` from step 3:
+//!
+//!   1. DISPLAY: 100 CLKs with previous ADDR (MOSFET discharge time)
+//!   2. ADDR: set row address for current iteration
+//!   3. SETUP: 28 CLKs with new ADDR stable
+//!   4. OE: W12 pulse (row 0) or W4 (others)
+//!
+//! Each iteration consumes one 32-bit DMA word:
 //!
 //! ```text
-//!   bits  [4:0]    ADDR (0..SCAN_LINES-1)
-//!   bits [15:5]    pre_clk − 1 (CLKs before OE rises, incl. setup)
-//!   bits [23:16]   oe_clk  − 1 (CLKs with OE asserted)
-//!   bits [31:24]   padding (dropped via `out null, 8`)
+//!   bits  [6:0]    display_clk − 1   (7 bits, `out y, 7`)
+//!   bits [11:7]    ADDR              (5 bits, `out pins, 5`)
+//!   bits [16:12]   setup_clk − 1     (5 bits, `out y, 5`)
+//!   bits [20:17]   oe_clk − 1        (4 bits, `out y, 4`)
+//!   bits [31:21]   padding           (11 bits, `out null, 11`)
 //! ```
-//!
-//! Program:
-//!
-//! ```text
-//! .side_set 1
-//! .wrap_target
-//!   out  pins, 5              side 0        ; ADDR <- header[4:0]
-//!   out  y,    11             side 0        ; Y  <- pre_clk − 1
-//! pre_clk:
-//!   nop                       side 0 [1]    ; CLK low, 2 cycles
-//!   jmp  y--, pre_clk         side 1        ; CLK high, decrement
-//!   out  y,    8              side 0        ; Y  <- oe_clk  − 1
-//!   set  pins, 1              side 0        ; OE high
-//! oe_clk:
-//!   nop                       side 0 [1]    ; CLK low
-//!   jmp  y--, oe_clk          side 1        ; CLK high
-//!   set  pins, 0              side 0        ; OE low
-//!   out  null, 8              side 0        ; drop header padding
-//! .wrap
-//! ```
-//!
-//! Three PIO cycles per CLK pulse — same rate as the SM0 data path,
-//! so the chip sees a single consistent 25 MHz DCLK from either SM.
 //!
 //! ## Scan buffer
 //!
@@ -99,7 +58,7 @@
 //! ## Run
 //!
 //! ```sh
-//! cargo run --release --example full_spwm_pio
+//! cargo run --release --example spwm_04_pio_scan
 //! ```
 
 #![no_std]
@@ -134,7 +93,7 @@ const CONFIG_REGS: [u16; 13] = [
     0x08BF, 0x0960, 0x0ABE, 0x0B8B, 0x0C88, 0x0D12,
 ];
 
-// ── Per-command CLK counts (unchanged from minimal_spwm_pio) ─────────
+// ── Per-command CLK counts (unchanged from spwm_03_pio_commands) ─────────
 const VSYNC_PRE: u32 = 1;    const VSYNC_LAT: u32 = 3;
 const VSYNC_WORDS: usize = 1;
 
@@ -205,7 +164,7 @@ fn build_scan_buf() {
     }
 }
 
-// ── Frame-buffer packing (unchanged from minimal_spwm_pio) ───────────
+// ── Frame-buffer packing (unchanged from spwm_03_pio_commands) ───────────
 
 const fn header(n_pre: u32, n_lat: u32) -> u32 {
     ((n_lat - 1) << 16) | (n_pre - 1)
@@ -356,7 +315,7 @@ fn main() -> ! {
     // Configure pads via `into_push_pull_output()` first — this sets
     // drive strength, disables pull-downs, and enables the output
     // driver at the pad level. Then bulk-switch funcsel to PIO0 via
-    // raw IO_BANK0 writes. This matches `minimal_spwm_pio`'s proven
+    // raw IO_BANK0 writes. This matches `spwm_03_pio_commands`'s proven
     // pad setup; using `into_function::<FunctionPio0>()` directly
     // left the pads misconfigured (pull-downs enabled, output driver
     // possibly not fully engaged).
@@ -404,7 +363,7 @@ fn main() -> ! {
     // ── 4. Install both PIO programs ─────────────────────────────────
     let (mut pio0, sm0, sm1, _, _) = pac.PIO0.split(&mut pac.RESETS);
 
-    // ── SM0: data path (same program as minimal_spwm_pio.rs, plus a
+    // ── SM0: data path (same program as spwm_03_pio_commands.rs, plus a
     //         `mov pins, null` cleanup so RGB settles to 0 on stall)
     let data_ss = pio::SideSet::new(false, 2, false);
     let mut da = pio::Assembler::new_with_side_set(data_ss);

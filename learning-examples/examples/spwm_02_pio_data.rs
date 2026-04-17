@@ -1,31 +1,19 @@
-//! # DP3364S S-PWM HUB75 Driver — PIO + DMA Data Loader
+//! # DP3364S S-PWM — Step 2: PIO + DMA for DATA_LATCH
 //!
-//! Second-stage implementation of the DP3364S driver. Builds directly on
-//! `minimal_spwm_cpu.rs` by offloading the hot path (the 512 DATA_LATCH
-//! operations per frame) to a PIO state machine fed by DMA.
+//! Second in the four-part progression. Builds on `spwm_01_cpu.rs`.
 //!
-//! ## What changed vs. `minimal_spwm_cpu`
+//! **What this step adds:** the 512 DATA_LATCH operations per frame
+//! (the hot path — ~65,000 SIO writes in step 1) move to a PIO state
+//! machine fed by DMA. The CPU is idle during the transfer.
 //!
-//! In the CPU version, `data_transfer_simple()` performs on the order of
-//! 65,000 SIO writes per frame: 512 latches × 128 pixel-clocks, each
-//! pixel doing two GPIO writes (set/clr data, pulse CLK). That is by
-//! far the largest single consumer of CPU time in the refresh loop.
+//! **What the CPU still does:** VSYNC, PRE_ACT, WR_CFG (bit-banged
+//! via SIO, with pin-function switching around the DMA burst) and the
+//! display scan loop (CLK + ROW pulses).
 //!
-//! This example replaces that inner loop with a short PIO program —
-//! six instructions, no branches except the per-pixel decrement — and
-//! streams the whole 64 KB frame buffer straight to the state machine
-//! via DMA. The CPU is idle during the transfer.
-//!
-//! ## Scope: DATA_LATCH only
-//!
-//! The S-PWM protocol has four commands distinguished by LAT pulse
-//! width (see `minimal_spwm_cpu.rs` for the full table). This
-//! implementation handles only DATA_LATCH (1-CLK LAT) in hardware.
-//! The three other commands (VSYNC, PRE_ACT, WR_CFG) have different
-//! pulse widths and remain CPU-bitbanged, exactly as in the CPU
-//! version. Unifying all four commands under PIO requires a more
-//! flexible program with a run-time-configurable LAT position — the
-//! subject of the next example.
+//! **Key concept:** the PIO program hard-codes LAT high on the 128th
+//! CLK of every latch (DATA_LATCH = 1-CLK LAT). The other three
+//! commands have different LAT widths and can't go through this
+//! program — that's solved in step 3.
 //!
 //! ## Pin-function handover
 //!
@@ -95,7 +83,7 @@
 //! ## Run
 //!
 //! ```sh
-//! cargo run --release --example minimal_spwm_dma
+//! cargo run --release --example spwm_02_pio_data
 //! ```
 
 #![no_std]
@@ -135,7 +123,7 @@ const ROW_PERIOD: usize = 128;
 
 // ── DP3264S / DP3364S configuration registers ────────────────────────
 //
-// See `minimal_spwm_cpu.rs` for a per-register explanation. One is
+// See `spwm_01_cpu.rs` for a per-register explanation. One is
 // written per frame via PRE_ACT + WR_CFG; round-robin through all 13.
 const CONFIG_REGS: [u16; 13] = [
     0x1100, 0x021F, 0x033F, 0x043F, 0x0504, 0x0642, 0x0700,
@@ -201,7 +189,7 @@ fn pins_to_pio0() {
     for &p in &SHARED_PINS { set_pin_func(p, FUNC_PIO0); }
 }
 
-// ── SIO bitbang helpers (identical to minimal_spwm_cpu) ──────────────
+// ── SIO bitbang helpers (identical to spwm_01_cpu) ──────────────
 type Sio = hal::pac::sio::RegisterBlock;
 
 #[inline(always)]

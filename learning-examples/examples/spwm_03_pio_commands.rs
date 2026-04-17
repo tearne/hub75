@@ -1,25 +1,21 @@
-//! # DP3364S S-PWM — Unified PIO + DMA for All Four Commands
+//! # DP3364S S-PWM — Step 3: All Commands via PIO + DMA
 //!
-//! Third-stage implementation of the DP3364S driver. Where
-//! `minimal_spwm_dma.rs` put only DATA_LATCH under PIO and kept
-//! VSYNC / PRE_ACT / WR_CFG on the CPU, this example unifies all
-//! four S-PWM commands under a single PIO program. A whole frame is
-//! issued as one DMA transfer; the CPU only runs `display_loop`
-//! (ROW + CLK pulses) between frames.
+//! Third in the four-part progression. Builds on `spwm_02_pio_data.rs`.
 //!
-//! ## What changed vs. `minimal_spwm_dma`
+//! **What this step adds:** all four S-PWM commands (VSYNC, PRE_ACT,
+//! WR_CFG, DATA_LATCH) now go through a single PIO program. Each
+//! command in the DMA stream begins with a 32-bit header encoding
+//! `N_pre` (CLKs with LAT low) and `N_lat` (CLKs with LAT high),
+//! so the same 8-instruction PIO program handles every LAT width.
+//! A whole frame is issued as one DMA transfer.
 //!
-//! The DATA_LATCH-only PIO program hard-coded LAT high on the 128th
-//! CLK. The other S-PWM commands (LAT widths 3, 5, 14) could not go
-//! through it, so they stayed CPU-bitbanged and the RGB+CLK+LAT pins
-//! had to be switched between PIO and SIO twice per frame.
+//! **What the CPU still does:** the display scan loop — CLK + ROW
+//! (OE) pulses to cycle through the 32 row addresses. Pins 0–5 and
+//! 11 are flipped SIO ↔ PIO0 once per frame for this phase.
 //!
-//! Here the PIO program takes a 32-bit control header at the start of
-//! every command describing how many CLKs to emit with LAT low and how
-//! many with LAT high. A single stream of headers + data drives all
-//! four commands at line rate, and LAT stays under PIO for the entire
-//! program lifetime. Only CLK and RGB pins still flip to SIO — and
-//! only once per frame, for the display phase.
+//! **What step 4 will add:** a second PIO state machine to drive
+//! the scan loop, eliminating the last CPU bit-bang and the
+//! pin-function switching.
 //!
 //! ## PIO program (8 instructions)
 //!
@@ -65,7 +61,7 @@
 //! the data portion fits in whole 32-bit words and autopull stays
 //! aligned with the header reads at the start of the next command.
 //!
-//! PRE_ACT in `minimal_spwm_cpu` uses 0 LAT-low CLKs before its 14 LAT
+//! PRE_ACT in `spwm_01_cpu` uses 0 LAT-low CLKs before its 14 LAT
 //! CLKs — we split that as 2 LAT-low + 14 LAT-high here, framed by the
 //! LAT-low idle time of the preceding and following commands. From the
 //! chip's point of view LAT is still high for exactly 14 consecutive
@@ -98,7 +94,7 @@
 //! ## Run
 //!
 //! ```sh
-//! cargo run --release --example minimal_spwm_pio
+//! cargo run --release --example spwm_03_pio_commands
 //! ```
 
 #![no_std]
