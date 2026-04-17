@@ -1,21 +1,17 @@
-//! # DP3364S S-PWM — Step 3: All Commands via PIO + DMA
+//! # DP3364S S-PWM — Step 2: PIO + DMA with Per-Pixel Colour
 //!
-//! Third in the four-part progression. Builds on `spwm_02_pio_data.rs`.
+//! Second in the three-part progression. Builds on `spwm_1_cpu.rs`.
 //!
-//! **What this step adds:** all four S-PWM commands (VSYNC, PRE_ACT,
-//! WR_CFG, DATA_LATCH) now go through a single PIO program. Each
-//! command in the DMA stream begins with a 32-bit header encoding
-//! `N_pre` (CLKs with LAT low) and `N_lat` (CLKs with LAT high),
-//! so the same 8-instruction PIO program handles every LAT width.
-//! A whole frame is issued as one DMA transfer.
+//! **What this step adds:** PIO+DMA replaces CPU bitbang for all four
+//! S-PWM commands (VSYNC, PRE_ACT, WR_CFG, DATA_LATCH). A per-pixel
+//! RGB888 framebuffer with gamma correction drives a scrolling HSV
+//! rainbow. The CPU still handles the scan loop (CLK + ROW/OE pulses)
+//! via SIO bitbang, with pin-function switching between PIO and SIO
+//! each frame.
 //!
-//! **What the CPU still does:** the display scan loop — CLK + ROW
-//! (OE) pulses to cycle through the 32 row addresses. Pins 0–5 and
-//! 11 are flipped SIO ↔ PIO0 once per frame for this phase.
-//!
-//! **What step 4 will add:** a second PIO state machine to drive
-//! the scan loop, eliminating the last CPU bit-bang and the
-//! pin-function switching.
+//! **What step 3 will add:** a second PIO SM for scan, eliminating the
+//! CPU scan loop and enabling pack/scan overlap (display stays lit
+//! during packing).
 //!
 //! ## PIO program (8 instructions)
 //!
@@ -37,64 +33,16 @@
 //! .wrap                               ; next `out x, 16 side 0b00` drops LAT
 //! ```
 //!
-//! The fall-through from pre_loop into lat_loop is the LAT rising
-//! edge; the wrap from lat_loop back to the header `out`s is the LAT
-//! falling edge. Between LAT-phase iterations, sideset stays at 0b10
-//! (LAT high) so the chip sees one continuous LAT pulse of the
-//! specified width.
-//!
-//! ## Command parameters
-//!
-//! All four S-PWM commands fit in the same program. `N_pre` ≥ 1 and
-//! `N_lat` ≥ 1 are required (the loop structure can't handle zero
-//! iterations in either phase).
-//!
-//! ```text
-//!                  N_pre  N_lat  Total CLKs  Data words (32 bits each)
-//!   VSYNC             1      3        4            1
-//!   PRE_ACT           2     14       16            4
-//!   WR_CFG          123      5      128           32
-//!   DATA_LATCH      127      1      128           32
-//! ```
-//!
-//! Every command's total CLK count is a multiple of 4 (= 32 bits), so
-//! the data portion fits in whole 32-bit words and autopull stays
-//! aligned with the header reads at the start of the next command.
-//!
-//! PRE_ACT in `spwm_01_cpu` uses 0 LAT-low CLKs before its 14 LAT
-//! CLKs — we split that as 2 LAT-low + 14 LAT-high here, framed by the
-//! LAT-low idle time of the preceding and following commands. From the
-//! chip's point of view LAT is still high for exactly 14 consecutive
-//! CLK rising edges, which is all the command decoder looks at.
-//!
-//! ## Frame buffer
-//!
-//! One u32 header + N u32 data words per command, 512 DATA_LATCHes per
-//! frame. Layout:
-//!
-//! ```text
-//!   [VSYNC: 1 hdr + 1 data]           2 words
-//!   [PRE_ACT: 1 hdr + 4 data]         5 words
-//!   [WR_CFG: 1 hdr + 32 data]        33 words
-//!   [DATA_LATCH × 512: 33 each]   16 896 words
-//!   ----------------------------------------
-//!                    total          16 936 words ≈ 68 KB
-//! ```
-//!
-//! The 512 DATA_LATCH blocks are filled once per colour change (every
-//! 300 frames). Only the WR_CFG block is re-packed per frame, so the
-//! amortised CPU work for buffer maintenance is 33 u32 writes/frame.
-//!
 //! ## Pin handover
 //!
-//! GPIO 12 (LAT) stays under PIO forever; no CPU code touches it.
-//! GPIO 0–5 (RGB) and GPIO 11 (CLK) still flip SIO ↔ PIO0 around
-//! `display_loop`, which CPU-bitbangs ROW + CLK pulses.
+//! GPIO 12 (LAT) stays under PIO for the whole program; GPIO 0–5 (RGB)
+//! and GPIO 11 (CLK) flip between SIO (for CPU-bitbanged display_loop)
+//! and PIO0 (for the DMA-driven command stream).
 //!
 //! ## Run
 //!
 //! ```sh
-//! cargo run --release --example spwm_03_pio_commands
+//! cargo run --release --example spwm_2_pio_cpu
 //! ```
 
 #![no_std]
@@ -126,23 +74,16 @@ const OE: u32 = 1 << 13;
 const ALL_HUB75: u32 = ALL_RGB | ADDR_MASK | CLK | LAT | OE;
 
 // ── Panel geometry (64×128, 1/32 scan) ───────────────────────────────
-// PANEL_WIDTH (128) and CHIPS_PER_CHAIN (8) are implicit in the
-// per-command word counts below: one 128-bit shift per DATA_LATCH
-// equals 32 u32 words of packed RGB+padding.
 const SCAN_LINES: usize = 32;
 const ROW_PERIOD: usize = 128;
 
 // ── DP3264S / DP3364S configuration registers ────────────────────────
 const CONFIG_REGS: [u16; 13] = [
-    0x1100, 0x021F, 0x033F, 0x043F, 0x0504, 0x0642, 0x0700,
+    0x1100, 0x021F, 0x037F, 0x043F, 0x0504, 0x0642, 0x0700,
     0x08BF, 0x0960, 0x0ABE, 0x0B8B, 0x0C88, 0x0D12,
 ];
 
 // ── Per-command CLK counts ───────────────────────────────────────────
-//
-// See module doc for the derivation. `WORDS_PER_COMMAND` counts the
-// data (not header); each command is one header u32 plus that many
-// data u32s.
 const VSYNC_PRE: u32 = 1;    const VSYNC_LAT: u32 = 3;
 const VSYNC_WORDS: usize = 1;
 
@@ -155,7 +96,6 @@ const WR_CFG_WORDS: usize = 32;
 const DATA_LATCH_PRE: u32 = 127; const DATA_LATCH_LAT: u32 = 1;
 const DATA_LATCH_WORDS: usize = 32;
 
-// Byte offsets into FRAME_BUF for each command's start (header).
 const VSYNC_OFFSET:      usize = 0;
 const PRE_ACT_OFFSET:    usize = VSYNC_OFFSET + 1 + VSYNC_WORDS;      // 2
 const WR_CFG_OFFSET:     usize = PRE_ACT_OFFSET + 1 + PRE_ACT_WORDS;  // 7
@@ -169,9 +109,48 @@ const FRAME_WORDS: usize =
 
 static mut FRAME_BUF: [u32; FRAME_WORDS] = [0u32; FRAME_WORDS];
 
+// ── Pixel type and framebuffer ───────────────────────────────────────
+
+#[derive(Copy, Clone)]
+struct Rgb { r: u8, g: u8, b: u8 }
+impl Rgb {
+    const fn new(r: u8, g: u8, b: u8) -> Self { Self { r, g, b } }
+    const BLACK: Rgb = Rgb::new(0, 0, 0);
+}
+
+static mut PIXELS: [[Rgb; 128]; 64] = [[Rgb::BLACK; 128]; 64];
+
+// ── Gamma LUT: 8-bit -> 14-bit greyscale ─────────────────────────────
+
+static GAMMA14: [u16; 256] = {
+    let mut lut = [0u16; 256];
+    let mut i = 0;
+    while i < 256 {
+        let v = (i as u32 * i as u32 * 0x3FFF) / (255 * 255);
+        lut[i] = v as u16;
+        i += 1;
+    }
+    lut
+};
+
+// ── HSV helper ───────────────────────────────────────────────────────
+
+fn hsv(hue: u8) -> Rgb {
+    let h = hue as u16;
+    let region = h / 43;
+    let remainder = (h - region * 43) * 6;
+    let q = (255 - remainder) as u8;
+    let t = remainder as u8;
+    match region {
+        0 => Rgb::new(255, t, 0),  1 => Rgb::new(q, 255, 0),
+        2 => Rgb::new(0, 255, t),  3 => Rgb::new(0, q, 255),
+        4 => Rgb::new(t, 0, 255),  _ => Rgb::new(255, 0, q),
+    }
+}
+
 // ── Frame-buffer packing ─────────────────────────────────────────────
 
-/// Pack a command header: low 16 bits = N_pre − 1, high 16 = N_lat − 1.
+/// Pack a command header: low 16 bits = N_pre - 1, high 16 = N_lat - 1.
 const fn header(n_pre: u32, n_lat: u32) -> u32 {
     ((n_lat - 1) << 16) | (n_pre - 1)
 }
@@ -193,39 +172,82 @@ fn pack_shift128(out: &mut [u32], word: u16, color_mask: u32) {
     }
 }
 
-/// Build the full frame buffer for a given colour / brightness. The
-/// WR_CFG header+data gets rewritten per frame by `update_wr_cfg`; the
-/// rest of the buffer only needs rebuilding on a colour change.
-fn build_frame(brightness: u16, color_mask: u32) {
+/// Write the static command headers (VSYNC, PRE_ACT, WR_CFG) into
+/// FRAME_BUF. Called once at startup; DATA_LATCH headers are written
+/// by `pack_pixels()`.
+fn init_frame_headers() {
     let buf = unsafe { &mut *core::ptr::addr_of_mut!(FRAME_BUF) };
-
-    // VSYNC — 1 header + 1 data word of zeros.
     buf[VSYNC_OFFSET] = header(VSYNC_PRE, VSYNC_LAT);
     buf[VSYNC_OFFSET + 1] = 0;
-
-    // PRE_ACT — 1 header + 4 data words of zeros.
     buf[PRE_ACT_OFFSET] = header(PRE_ACT_PRE, PRE_ACT_LAT);
     for i in 0..PRE_ACT_WORDS {
         buf[PRE_ACT_OFFSET + 1 + i] = 0;
     }
-
-    // WR_CFG — header written here; data payload re-written each
-    // frame by update_wr_cfg() with the current register entry.
     buf[WR_CFG_OFFSET] = header(WR_CFG_PRE, WR_CFG_LAT);
-
-    // DATA_LATCH × 512 — every latch gets the same pattern.
     for l in 0..LATCHES_PER_FRAME {
-        let hdr = DATA_LATCH_OFFSET + l * DATA_LATCH_STRIDE;
-        buf[hdr] = header(DATA_LATCH_PRE, DATA_LATCH_LAT);
-        pack_shift128(
-            &mut buf[hdr + 1 .. hdr + 1 + DATA_LATCH_WORDS],
-            brightness, color_mask,
-        );
+        buf[DATA_LATCH_OFFSET + l * DATA_LATCH_STRIDE] =
+            header(DATA_LATCH_PRE, DATA_LATCH_LAT);
+    }
+}
+
+/// Pack the PIXELS framebuffer into FRAME_BUF's DATA_LATCH regions.
+///
+/// Gamma-corrected greyscale is precomputed per column (8 chips x
+/// 6 channels = 48 lookups per latch) rather than per pixel-clock
+/// (128 x 6 = 768), cutting gamma lookups from 393 K to 24 K.
+fn pack_pixels() {
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(FRAME_BUF) };
+    let pixels = unsafe { &*core::ptr::addr_of!(PIXELS) };
+
+    for scan_line in 0..SCAN_LINES {
+        let upper_row = scan_line;
+        let lower_row = scan_line + 32;
+
+        for channel in 0..16usize {
+            let latch_idx = scan_line * 16 + channel;
+            let base = DATA_LATCH_OFFSET + latch_idx * DATA_LATCH_STRIDE + 1;
+            let output = 15 - channel;
+
+            let mut ur = [0u16; 8];
+            let mut ug = [0u16; 8];
+            let mut ub = [0u16; 8];
+            let mut lr = [0u16; 8];
+            let mut lg = [0u16; 8];
+            let mut lb = [0u16; 8];
+            for chip in 0..8usize {
+                let col = chip * 16 + output;
+                let u = pixels[upper_row][col];
+                let l = pixels[lower_row][col];
+                ur[chip] = GAMMA14[u.r as usize];
+                ug[chip] = GAMMA14[u.g as usize];
+                ub[chip] = GAMMA14[u.b as usize];
+                lr[chip] = GAMMA14[l.r as usize];
+                lg[chip] = GAMMA14[l.g as usize];
+                lb[chip] = GAMMA14[l.b as usize];
+            }
+
+            for w in 0..32usize {
+                let mut acc: u32 = 0;
+                for slot in 0..4usize {
+                    let pix = w * 4 + slot;
+                    let chip = 7 - (pix >> 4);
+                    let bit_pos = 15 - (pix & 15);
+
+                    let bits = ((ur[chip] >> bit_pos) & 1) as u32
+                        | (((ug[chip] >> bit_pos) & 1) as u32) << 1
+                        | (((ub[chip] >> bit_pos) & 1) as u32) << 2
+                        | (((lr[chip] >> bit_pos) & 1) as u32) << 3
+                        | (((lg[chip] >> bit_pos) & 1) as u32) << 4
+                        | (((lb[chip] >> bit_pos) & 1) as u32) << 5;
+                    acc |= bits << (slot * 8);
+                }
+                buf[base + w] = acc;
+            }
+        }
     }
 }
 
 /// Rewrite only the WR_CFG payload to carry the next register entry.
-/// Called once per refresh frame as `reg_idx` advances.
 fn update_wr_cfg(reg_idx: usize) {
     let buf = unsafe { &mut *core::ptr::addr_of_mut!(FRAME_BUF) };
     let reg = CONFIG_REGS[reg_idx];
@@ -233,6 +255,17 @@ fn update_wr_cfg(reg_idx: usize) {
         &mut buf[WR_CFG_OFFSET + 1 .. WR_CFG_OFFSET + 1 + WR_CFG_WORDS],
         reg, ALL_RGB,
     );
+}
+
+/// Fill the PIXELS framebuffer with a scrolling HSV rainbow.
+fn fill_pixels(offset: u8) {
+    let pixels = unsafe { &mut *core::ptr::addr_of_mut!(PIXELS) };
+    for row in 0..64usize {
+        for col in 0..128usize {
+            let hue = (col as u32 * 255 / 127) as u8;
+            pixels[row][col] = hsv(hue.wrapping_add(offset));
+        }
+    }
 }
 
 // ── Pin-function switching ───────────────────────────────────────────
@@ -384,83 +417,47 @@ fn main() -> ! {
         (11, hal::pio::PinDir::Output), (12, hal::pio::PinDir::Output),
     ]);
 
-    // No one-time Y preload — every command carries its own X/Y header.
     let _sm = sm.start();
 
     // ── 4. DMA ───────────────────────────────────────────────────────
     let dma = pac.DMA.split(&mut pac.RESETS);
-    let mut dma_ch = dma.ch0;
-    let mut tx = tx;
+    let mut data_ch = dma.ch0;
+    let mut data_tx = tx;
 
-    defmt::info!("DP3364S S-PWM (unified PIO+DMA) starting");
+    defmt::info!("DP3364S S-PWM (PIO+DMA, per-pixel) starting");
 
     // ── 5. Main loop ─────────────────────────────────────────────────
-    let tests: [(u16, u32, &str); 6] = [
-        (0x3FFF, ALL_RGB,  "bright white"),
-        (0x00FF, ALL_RGB,  "dim white"),
-        (0x0000, ALL_RGB,  "black"),
-        (0x3FFF, R0 | R1,  "red"),
-        (0x3FFF, G0 | G1,  "green"),
-        (0x3FFF, B0 | B1,  "blue"),
-    ];
+    init_frame_headers();
+    let mut reg_idx: usize = 0;
+    let mut offset: u8 = 0;
 
-    let mut test_idx: usize = 0;
-    // Config registers are written once each during the first 13
-    // frames, then dropped from the stream. `cfg_written` climbs from
-    // 0 to 13 and then stays; after that the DMA path skips the
-    // WR_CFG block entirely via a two-kick transfer.
-    let mut cfg_written: usize = 0;
+    // Fill + pack first frame
+    fill_pixels(offset);
+    pack_pixels();
 
     loop {
-        let (brightness, color_mask, name) = tests[test_idx % tests.len()];
-        defmt::info!("{}", name);
-        build_frame(brightness, color_mask);
+        // WR_CFG for this frame
+        update_wr_cfg(reg_idx);
+        reg_idx = (reg_idx + 1) % CONFIG_REGS.len();
 
-        for _ in 0..300 {
-            pins_to_pio0();
+        // Data phase: DMA full buffer to SM0
+        pins_to_pio0();
+        let buf = unsafe { &*core::ptr::addr_of!(FRAME_BUF) };
+        let cfg = single_buffer::Config::new(data_ch, buf, data_tx);
+        let xfer = cfg.start();
+        let (ch, _, new_tx) = xfer.wait();
+        data_ch = ch;
+        data_tx = new_tx;
+        while !data_tx.is_empty() { cortex_m::asm::nop(); }
+        cortex_m::asm::delay(50);
 
-            if cfg_written < CONFIG_REGS.len() {
-                // Early phase: include a fresh WR_CFG this frame.
-                update_wr_cfg(cfg_written);
-                cfg_written += 1;
+        // Scan phase: CPU bitbang
+        pins_to_sio();
+        display_loop(sio, 10);
 
-                let buf = unsafe { &*core::ptr::addr_of!(FRAME_BUF) };
-                let cfg = single_buffer::Config::new(dma_ch, buf, tx);
-                let xfer = cfg.start();
-                let (ch, _, new_tx) = xfer.wait();
-                dma_ch = ch;
-                tx = new_tx;
-            } else {
-                // Config loaded — skip WR_CFG. Two DMA kicks bracket
-                // the hole left in the buffer; PIO just stalls on an
-                // empty FIFO in between and picks up where it left off.
-                let frame = unsafe { &*core::ptr::addr_of!(FRAME_BUF) };
-                let prefix: &[u32] = &frame[..WR_CFG_OFFSET];
-                let cfg1 = single_buffer::Config::new(dma_ch, prefix, tx);
-                let xfer1 = cfg1.start();
-                let (ch, _, new_tx) = xfer1.wait();
-                dma_ch = ch;
-                tx = new_tx;
-
-                let frame = unsafe { &*core::ptr::addr_of!(FRAME_BUF) };
-                let data: &[u32] = &frame[DATA_LATCH_OFFSET..];
-                let cfg2 = single_buffer::Config::new(dma_ch, data, tx);
-                let xfer2 = cfg2.start();
-                let (ch, _, new_tx) = xfer2.wait();
-                dma_ch = ch;
-                tx = new_tx;
-            }
-
-            // Wait for the PIO FIFO to drain so the final DATA_LATCH
-            // has actually been clocked out before the function flip.
-            while !tx.is_empty() { cortex_m::asm::nop(); }
-            cortex_m::asm::delay(50);
-
-            // ── CPU drives ROW + CLK scanning ────────────────────
-            pins_to_sio();
-            display_loop(sio, 10);
-        }
-
-        test_idx += 1;
+        // Pack next frame (display dark during this — the cost of CPU scan)
+        offset = offset.wrapping_add(2);
+        fill_pixels(offset);
+        pack_pixels();
     }
 }

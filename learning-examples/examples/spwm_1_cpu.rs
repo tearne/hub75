@@ -1,14 +1,13 @@
 //! # DP3364S S-PWM — Step 1: CPU Bit-Bang
 //!
-//! First in a four-part progression (`spwm_01` → `spwm_04`) that
+//! First in a three-part progression (`spwm_1` → `spwm_3`) that
 //! incrementally moves panel driving from CPU to PIO + DMA hardware:
 //!
-//! | Example              | What the CPU does              | What hardware does         |
-//! |----------------------|--------------------------------|----------------------------|
-//! | **01_cpu (this)**    | Everything                     | —                          |
-//! | 02_pio_data          | VSYNC/PRE_ACT/WR_CFG + scan   | DATA_LATCH via PIO+DMA     |
-//! | 03_pio_commands      | Scan (display_loop)            | All 4 commands via PIO+DMA |
-//! | 04_pio_scan          | Pack buffers, kick DMA         | Commands + scan (two SMs)  |
+//! | Example                | What the CPU does            | What hardware does         |
+//! |------------------------|------------------------------|----------------------------|
+//! | **1_cpu (this)**       | Everything                   | —                          |
+//! | 2_pio_cpu              | Scan + pack framebuffer      | All 4 commands via PIO+DMA |
+//! | 3_dual_pio             | Pack framebuffer             | Commands + scan (two SMs)  |
 //!
 //! This first step bit-bangs every signal — CLK, LAT, RGB data, ADDR,
 //! OE — directly from the CPU via SIO register writes. No PIO, no
@@ -131,7 +130,7 @@
 //! ## Run
 //!
 //! ```sh
-//! cargo run --release --example spwm_01_cpu
+//! cargo run --release --example spwm_1_cpu
 //! ```
 
 #![no_std]
@@ -198,7 +197,7 @@ const ROW_PERIOD: usize = 128;
 const CONFIG_REGS: [u16; 13] = [
     0x1100, // reg 0x11 = 0x00  Reserved (included per DMD_STM32 reference)
     0x021F, // reg 0x02 = 0x1F  LINE_SET = 31 → 32 scan lines
-    0x033F, // reg 0x03 = 0x3F  GROUP_SET = 63 → 64 display groups
+    0x037F, // reg 0x03 = 0x7F  GROUP_SET = 127 → 128 display groups
     0x043F, // reg 0x04 = 0x3F  PWM_WIDTH = 63 → max greyscale depth
     0x0504, // reg 0x05 = 0x04  DISSHD_TIME (shadow/disappearance timing)
     0x0642, // reg 0x06 = 0x42  PLL_DIV = 2 → GCLK = DCLK × 3
@@ -342,65 +341,38 @@ fn display_loop(sio: &Sio, cycles: usize) {
 }
 
 // ── Data transfer ────────────────────────────────────────────────────
+//
+// The 512 DATA_LATCH operations are structured as:
+//   - Outer: 32 scan lines (each drives a row pair: upper + lower half)
+//   - Inner: 16 channels per chip (OUT15 first, OUT0 last)
+//
+// Within each channel latch, 128 bits are shifted through the chain.
+// The first bits shifted end up at the last chip (farthest from the
+// connector); the last bits shifted stay at the first chip (nearest).
 
-/// Load greyscale data into the DP3364S SRAM for all scan lines and
-/// output channels.
-///
-/// `brightness`: 14-bit greyscale value (0x0000–0x3FFF) for the background.
-/// `color_mask`: which of the 6 RGB data lines receive the brightness
-///               value. Unselected lines are held low (black on that
-///               channel). For example:
-///                 - `R0 | R1`  → red only
-///                 - `G0 | G1`  → green only
-///                 - `ALL_RGB`  → white
-/// `highlight_col`: column (0..PANEL_WIDTH-1) to draw as a bright white
-///                  vertical line, or `usize::MAX` to disable.
-///
-/// ## Data addressing
-///
-/// The 512 DATA_LATCH operations are structured as:
-///   - Outer: 32 scan lines (each drives a row pair: upper + lower half)
-///   - Inner: 16 channels per chip (OUT15 first, OUT0 last)
-///
-/// Within each channel latch, 128 bits are shifted through the chain.
-/// The first bits shifted end up at the last chip (farthest from the
-/// connector); the last bits shifted stay at the first chip (nearest).
-///
-/// To address a specific column, we need to determine which chip and
-/// which output channel it maps to, and send the highlight brightness
-/// only for that combination.
-/// Shift one latch (128 bits) of uniform data. This is the fast path
-/// used for 511 of the 512 latches per frame.
-#[inline(always)]
+// ── Solid-fill data transfer with scanning highlight ─────────────────
+
+/// Shift one latch (128 bits) of uniform data with DATA_LATCH (LAT=1).
+/// All chips and all colour chains receive the same brightness.
 fn latch_uniform(sio: &Sio, brightness: u16, color_mask: u32) {
-    let lat_at = CHAIN_BITS - 1;
+    let lat_start = CHAIN_BITS - 1;
     for i in 0..CHAIN_BITS {
         let bit_pos = 15 - (i % 16);
-        if i == lat_at {
-            sio.gpio_out_set()
-                .write(|w| unsafe { w.bits(LAT) });
+        if i == lat_start {
+            sio.gpio_out_set().write(|w| unsafe { w.bits(LAT) });
         }
-        sio.gpio_out_clr()
-            .write(|w| unsafe { w.bits(ALL_RGB) });
+        sio.gpio_out_clr().write(|w| unsafe { w.bits(ALL_RGB) });
         if (brightness >> bit_pos) & 1 == 1 {
-            sio.gpio_out_set()
-                .write(|w| unsafe { w.bits(color_mask) });
+            sio.gpio_out_set().write(|w| unsafe { w.bits(color_mask) });
         }
         clock_pulse(sio);
     }
-    sio.gpio_out_clr()
-        .write(|w| unsafe { w.bits(LAT | ALL_RGB) });
+    sio.gpio_out_clr().write(|w| unsafe { w.bits(LAT | ALL_RGB) });
 }
 
-/// Shift one latch with a single chip highlighted (different brightness/colour).
-#[inline(always)]
-fn latch_with_highlight(
-    sio: &Sio,
-    brightness: u16,
-    color_mask: u32,
-    hl_shift_pos: usize,
-) {
-    let lat_at = CHAIN_BITS - 1;
+/// Shift one latch with one chip highlighted at full white.
+fn latch_with_highlight(sio: &Sio, brightness: u16, color_mask: u32, hl_shift_pos: usize) {
+    let lat_start = CHAIN_BITS - 1;
     for i in 0..CHAIN_BITS {
         let bit_pos = 15 - (i % 16);
         let (b, m) = if (i >> 4) == hl_shift_pos {
@@ -408,28 +380,20 @@ fn latch_with_highlight(
         } else {
             (brightness, color_mask)
         };
-        if i == lat_at {
-            sio.gpio_out_set()
-                .write(|w| unsafe { w.bits(LAT) });
+        if i == lat_start {
+            sio.gpio_out_set().write(|w| unsafe { w.bits(LAT) });
         }
-        sio.gpio_out_clr()
-            .write(|w| unsafe { w.bits(ALL_RGB) });
+        sio.gpio_out_clr().write(|w| unsafe { w.bits(ALL_RGB) });
         if (b >> bit_pos) & 1 == 1 {
-            sio.gpio_out_set()
-                .write(|w| unsafe { w.bits(m) });
+            sio.gpio_out_set().write(|w| unsafe { w.bits(m) });
         }
         clock_pulse(sio);
     }
-    sio.gpio_out_clr()
-        .write(|w| unsafe { w.bits(LAT | ALL_RGB) });
+    sio.gpio_out_clr().write(|w| unsafe { w.bits(LAT | ALL_RGB) });
 }
 
-fn data_transfer_simple(
-    sio: &Sio,
-    brightness: u16,
-    color_mask: u32,
-    highlight_col: usize,
-) {
+/// Load solid-colour data with a scanning vertical highlight line.
+fn data_transfer_simple(sio: &Sio, brightness: u16, color_mask: u32, highlight_col: usize) {
     let hl_chip_phys = highlight_col / 16;
     let hl_output = highlight_col % 16;
     let hl_channel = 15 - hl_output;
@@ -498,9 +462,6 @@ fn main() -> ! {
 
     // ── 3. Main refresh loop ─────────────────────────────────────────
     //
-    // Each iteration of the outer loop displays one test pattern for
-    // approximately 4–5 seconds (300 refresh frames).
-    //
     // Each refresh frame:
     //   1. VSYNC (starts the frame)
     //   2. PRE_ACT + WR_CFG (writes one config register, round-robin)
@@ -512,42 +473,34 @@ fn main() -> ! {
     // simultaneously receives data and begins displaying.
 
     let tests: [(u16, u32, &str); 6] = [
-        (0x3FFF, ALL_RGB,  "bright white"),
-        (0x00FF, ALL_RGB,  "dim white"),
-        (0x0000, ALL_RGB,  "black"),
-        (0x3FFF, R0 | R1,  "red"),
-        (0x3FFF, G0 | G1,  "green"),
-        (0x3FFF, B0 | B1,  "blue"),
+        (0x3FFF, ALL_RGB, "bright white"),
+        (0x00FF, ALL_RGB, "dim white"),
+        (0x0000, ALL_RGB, "black"),
+        (0x3FFF, R0 | R1, "red"),
+        (0x3FFF, G0 | G1, "green"),
+        (0x3FFF, B0 | B1, "blue"),
     ];
 
-    let mut test_idx: usize = 0;
-    let mut reg_idx: usize = 0;
-    let mut scan_col: usize = 0; // Column position of the scanning line
-    let mut frame_count: usize = 0; // Frame counter for slowing the scan
+    let mut test_idx = 0;
+    let mut reg_idx = 0;
+    let mut scan_col = 0;
+    let mut frame_count = 0;
 
     loop {
         let (brightness, color_mask, name) = tests[test_idx % tests.len()];
         defmt::info!("{}", name);
 
         for _ in 0..300 {
-            // ── Frame start ──────────────────────────────────────
             vsync(sio);
             send_clocks(sio, 16);
-
-            // ── Config register (one per frame, round-robin) ─────
             pre_act(sio);
             send_clocks(sio, 8);
             wr_cfg(sio, CONFIG_REGS[reg_idx]);
             send_clocks(sio, 8);
-            reg_idx += 1;
-            if reg_idx >= CONFIG_REGS.len() {
-                reg_idx = 0;
-            }
+            reg_idx = (reg_idx + 1) % CONFIG_REGS.len();
 
-            // ── Pixel data with scanning vertical line ───────────
             data_transfer_simple(sio, brightness, color_mask, scan_col);
 
-            // Advance column every 4 frames for visible scanning.
             frame_count += 1;
             if frame_count >= 4 {
                 frame_count = 0;
@@ -557,10 +510,8 @@ fn main() -> ! {
                 }
             }
 
-            // ── Display (CLK feeds PLL, ROW advances scan) ───────
             display_loop(sio, 10);
         }
-
         test_idx += 1;
     }
 }

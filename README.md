@@ -6,7 +6,7 @@ Rust firmware for driving HUB75 LED matrix panels from the [Pimoroni Interstate 
 
 | Directory | Description |
 |-----------|-------------|
-| [`learning-examples/`](learning-examples/) | Self-contained bare-metal examples, from blinking an LED to autonomous DMA scanning |
+| [`learning-examples/`](learning-examples/) | Self-contained bare-metal examples progressing from CPU bit-bang to fully autonomous PIO+DMA scanning. Covers two families of HUB75 driver chip (shift-register BCM and S-PWM). |
 | [`usb-display/`](usb-display/) | USB-driven display firmware (Embassy) + Python/Rust host clients |
 
 ## Prerequisites
@@ -31,12 +31,6 @@ echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="2e8a", MODE="0666"' | sudo tee /etc/ude
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
-## Hardware
-
-- [Pimoroni Interstate 75 W](https://shop.pimoroni.com/products/interstate-75-w) (RP2350A version)
-- 64x64 HUB75 LED matrix panel
-- Raspberry Pi Debug Probe (or any CMSIS-DAP SWD probe) for flashing
-
 ## Acknowledgements
 
-The autonomous DMA scanning architecture is based on [dgrantpete/Pi-Pico-Hub75-Driver](https://github.com/dgrantpete/Pi-Pico-Hub75-Driver).
+The autonomous DMA scanning architecture (shift-register examples) is based on [dgrantpete/Pi-Pico-Hub75-Driver](https://github.com/dgrantpete/Pi-Pico-Hub75-Driver).
