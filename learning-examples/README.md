@@ -38,6 +38,8 @@ cargo run --release --example <name>
 | `spwm_3_dual_pio` | Scrolling rainbow (faster, less flicker) | Pack framebuffer | Commands + scan (two SMs) |
 | `spwm_4_dual_core` | Scrolling rainbow (smoothest) | Display loop only | Packing on core 1, display on core 0 |
 | `spwm_5_unified_sm` | Scrolling rainbow (no dark gap) | Display loop only | Single SM for data+scan, dual-core packing |
+| `spwm_6_ring_dma` | Scrolling rainbow (gapless scan) | Buffer swap only | Ring-mode DMA for continuous scan |
+| `spwm_7_chained_dma` | *Not yet implemented* | — | Chained DMA: scan→data→scan in hardware |
 
 ## Two families of HUB75 driver chip
 
@@ -72,8 +74,10 @@ The S-PWM protocol reuses the HUB75 pins with different semantics: commands are 
 | `spwm_3_dual_pio` | Dual PIO SM with overlapped packing — scrolling rainbow (brighter, smoother) |
 | `spwm_4_dual_core` | Core 1 packs framebuffer while core 0 drives display — smoothest rainbow |
 | `spwm_5_unified_sm` | Single SM for data+scan (no handover dark gap) — dual-core, constant brightness |
+| `spwm_6_ring_dma` | Ring-mode DMA for gapless scan — zero micro-stutter between scan passes |
+| `spwm_7_chained_dma` | *Placeholder* — chained DMA: scan→data→scan entirely in hardware |
 
-Progression: `spwm_1` → `spwm_2` → `spwm_3` → `spwm_4` → `spwm_5`.
+Progression: `spwm_1` → `spwm_2` → `spwm_3` → `spwm_4` → `spwm_5` → `spwm_6` → `spwm_7`.
 
 ### Other
 
