@@ -1,24 +1,38 @@
-//! # DP3364S S-PWM — Step 3: Dual PIO with Overlapped Packing
+//! # DP3364S S-PWM — Step 4: Dual-Core Packing
 //!
-//! Third in the three-part progression. Builds on `spwm_2_pio_cpu.rs`.
+//! Fourth in the SPWM progression. Builds on `spwm_3_dual_pio.rs`.
 //!
-//! **What this step adds:** a second PIO state machine (SM1) drives the
-//! scan loop — CLK + ROW (OE) pulses — eliminating the CPU bit-bang
-//! scan and pin-function switching from step 2. SM0 and SM1 share
-//! GPIO 11 (CLK), so a pindir handover protocol transfers ownership
-//! between them each frame. A startup flush sequence sends 14 black
-//! frames (with WR_CFG) to initialise the driver chips cleanly.
+//! **What this step adds:** core 1 handles `fill_pixels` + `pack_pixels`
+//! while core 0 drives the display via PIO+DMA. Double-buffered frame
+//! data ensures no tearing.
 //!
-//! The key benefit: packing the next frame overlaps with scanning the
-//! current one. In step 2, the display goes dark while the CPU packs
-//! because packing and scanning are sequential on the same core. Here,
-//! SM1 keeps the display lit while the CPU fills the pixel buffer and
-//! packs the DMA buffer — resulting in a brighter image and less flicker.
+//! **Architecture:** core 0 scans continuously from chip SRAM, only
+//! pausing briefly (~2.6ms) to DMA new frame data when core 1 signals
+//! a freshly packed buffer is ready. Brightness is constant regardless
+//! of how long packing takes — scan duty cycle is decoupled from pack
+//! performance.
+//!
+//! ```text
+//!   Core 0: scan loop (SM1) ──→ core 1 done? ──→ pause, DMA new
+//!           ↑                     no → keep scanning    data (SM0),
+//!           └──────────────────────────────────────── resume scan
+//!
+//!   Core 1: wait for signal → fill pixels → pack → signal done
+//! ```
+//!
+//! Communication via SIO FIFO (hardware mailbox between cores).
+//!
+//! **Remaining limitation:** each data load requires a ~2.6ms dark gap
+//! for the SM0↔SM1 handover (shared CLK pin). At high pack rates this
+//! is imperceptible (frequent short gaps = steady dim). At low pack
+//! rates (<60 FPS) individual gaps become visible as flicker. Eliminating
+//! this would require a single-SM architecture that interleaves data
+//! loading with scan — no handover, no dark gap.
 //!
 //! ## Run
 //!
 //! ```sh
-//! cargo run --release --example spwm_3_dual_pio
+//! cargo run --release --example spwm_4_dual_core
 //! ```
 
 #![no_std]
@@ -74,34 +88,23 @@ const DATA_LATCH_OFFSET: usize = WR_CFG_OFFSET + 1 + WR_CFG_WORDS;    // 40
 const LATCHES_PER_FRAME: usize = SCAN_LINES * 16; // 512
 const DATA_LATCH_STRIDE: usize = 1 + DATA_LATCH_WORDS; // 33
 
-// Number of chunks to split the data phase into. Between each chunk,
-// a full scan pass runs — keeping the display lit. More chunks = less
-// flicker but slower frame rate. 1 = original behaviour (one big
-// dark gap). 4 = good balance (~0.65 ms dark gaps at 79 fps).
-// Data chunking: split the 512-latch data phase into smaller bursts
-// with scan passes between them. Reduces individual dark-gap duration
-// but adds scan overhead per chunk. Set to 1 for original behaviour.
-// Higher values need shorter DISPLAY_CYCLES to keep frame rate up.
-const DATA_CHUNKS: usize = 1;
-const LATCHES_PER_CHUNK: usize = LATCHES_PER_FRAME / DATA_CHUNKS;
-
 const FRAME_WORDS: usize =
     DATA_LATCH_OFFSET + LATCHES_PER_FRAME * DATA_LATCH_STRIDE; // 16 936
 
-static mut FRAME_BUF: [u32; FRAME_WORDS] = [0u32; FRAME_WORDS];
+// ── Double-buffered frame data ───────────────────────────────────────
+static mut FRAME_BUF_A: [u32; FRAME_WORDS] = [0u32; FRAME_WORDS];
+static mut FRAME_BUF_B: [u32; FRAME_WORDS] = [0u32; FRAME_WORDS];
+
+// ── Core 1 stack ─────────────────────────────────────────────────────
+static mut CORE1_STACK: hal::multicore::Stack<4096> = hal::multicore::Stack::new();
 
 // ── Scan parameters ──────────────────────────────────────────────────
-// Must be large enough that scan outlasts pack_pixels (~5 ms).
-// At ~7.8 μs per scan iteration: 25 × 32 = 800 iters ≈ 6.2 ms > 5 ms.
-const DISPLAY_CYCLES: usize = 25;
-const SCAN_ITERS: usize = DISPLAY_CYCLES * SCAN_LINES;
-
 const DISPLAY_CLK: u32 = 100;
 const SETUP_CLK: u32 = 28;
 const OE_CLK_W4: u32 = 4;
 const OE_CLK_W12: u32 = 12;
 
-static mut SCAN_BUF: [u32; SCAN_ITERS] = [0u32; SCAN_ITERS];
+static mut SCAN_BUF: [u32; SCAN_LINES] = [0u32; SCAN_LINES];
 
 // ── Pixel type and framebuffer ───────────────────────────────────────
 
@@ -146,11 +149,10 @@ fn hsv(hue: u8) -> Rgb {
 
 fn build_scan_buf() {
     let buf = unsafe { &mut *core::ptr::addr_of_mut!(SCAN_BUF) };
-    for i in 0..SCAN_ITERS {
-        let row = (i % SCAN_LINES) as u32;
+    for row in 0..SCAN_LINES {
         let oe = if row == 0 { OE_CLK_W12 } else { OE_CLK_W4 };
-        buf[i] = (DISPLAY_CLK - 1)
-            | (row << 7)
+        buf[row] = (DISPLAY_CLK - 1)
+            | ((row as u32) << 7)
             | ((SETUP_CLK - 1) << 12)
             | ((oe - 1) << 17);
     }
@@ -177,10 +179,9 @@ fn pack_shift128(out: &mut [u32], word: u16, color_mask: u32) {
 }
 
 /// Write the static command headers (VSYNC, PRE_ACT, WR_CFG) into
-/// FRAME_BUF. Called once at startup; DATA_LATCH headers are written
-/// by `pack_pixels()`.
-fn init_frame_headers() {
-    let buf = unsafe { &mut *core::ptr::addr_of_mut!(FRAME_BUF) };
+/// the given frame buffer. Called once at startup for each buffer;
+/// DATA_LATCH headers are written by `pack_pixels()`.
+fn init_frame_headers(buf: &mut [u32; FRAME_WORDS]) {
     buf[VSYNC_OFFSET] = header(VSYNC_PRE, VSYNC_LAT);
     buf[VSYNC_OFFSET + 1] = 0;
     buf[PRE_ACT_OFFSET] = header(PRE_ACT_PRE, PRE_ACT_LAT);
@@ -194,22 +195,23 @@ fn init_frame_headers() {
     }
 }
 
-/// Pack the PIXELS framebuffer into FRAME_BUF's DATA_LATCH regions.
+/// Pack the PIXELS framebuffer into the given frame buffer's
+/// DATA_LATCH regions.
 ///
 /// Gamma-corrected greyscale is precomputed per column (8 chips x
 /// 6 channels = 48 lookups per latch) rather than per pixel-clock
 /// (128 x 6 = 768), cutting gamma lookups from 393 K to 24 K.
-fn pack_pixels() {
-    let buf = unsafe { &mut *core::ptr::addr_of_mut!(FRAME_BUF) };
+fn pack_pixels(buf: &mut [u32; FRAME_WORDS]) {
     let pixels = unsafe { &*core::ptr::addr_of!(PIXELS) };
 
-    for scan_line in 0..SCAN_LINES {
-        let upper_row = scan_line;
-        let lower_row = scan_line + 32;
-
+    // The rainbow is vertically uniform so we pack scan line 0 and
+    // copy the results to the remaining 31 scan lines.
+    let mut cache = [[0u32; 32]; 16];
+    {
+        let upper_row = 0;
+        let lower_row = 32;
         for channel in 0..16usize {
-            let latch_idx = scan_line * 16 + channel;
-            let base = DATA_LATCH_OFFSET + latch_idx * DATA_LATCH_STRIDE + 1;
+            let base = DATA_LATCH_OFFSET + channel * DATA_LATCH_STRIDE + 1;
             let output = 15 - channel;
 
             let mut ur = [0u16; 8];
@@ -236,28 +238,108 @@ fn pack_pixels() {
                     let pix = w * 4 + slot;
                     let chip = 7 - (pix >> 4);
                     let bit_pos = 15 - (pix & 15);
-
-                    let bits = ((ur[chip] >> bit_pos) & 1) as u32
-                        | (((ug[chip] >> bit_pos) & 1) as u32) << 1
-                        | (((ub[chip] >> bit_pos) & 1) as u32) << 2
-                        | (((lr[chip] >> bit_pos) & 1) as u32) << 3
-                        | (((lg[chip] >> bit_pos) & 1) as u32) << 4
-                        | (((lb[chip] >> bit_pos) & 1) as u32) << 5;
-                    acc |= bits << (slot * 8);
+                    let shift = slot * 8;
+                    acc |= (((ur[chip] >> bit_pos) & 1) as u32) << shift;
+                    acc |= (((ug[chip] >> bit_pos) & 1) as u32) << (shift + 1);
+                    acc |= (((ub[chip] >> bit_pos) & 1) as u32) << (shift + 2);
+                    acc |= (((lr[chip] >> bit_pos) & 1) as u32) << (shift + 3);
+                    acc |= (((lg[chip] >> bit_pos) & 1) as u32) << (shift + 4);
+                    acc |= (((lb[chip] >> bit_pos) & 1) as u32) << (shift + 5);
                 }
                 buf[base + w] = acc;
+                cache[channel][w] = acc;
             }
+        }
+    }
+
+    for scan_line in 1..SCAN_LINES {
+        for channel in 0..16usize {
+            let latch_idx = scan_line * 16 + channel;
+            let base = DATA_LATCH_OFFSET + latch_idx * DATA_LATCH_STRIDE + 1;
+            buf[base..base + 32].copy_from_slice(&cache[channel]);
         }
     }
 }
 
-fn update_wr_cfg(reg_idx: usize) {
-    let buf = unsafe { &mut *core::ptr::addr_of_mut!(FRAME_BUF) };
+fn update_wr_cfg(buf: &mut [u32; FRAME_WORDS], reg_idx: usize) {
     let reg = CONFIG_REGS[reg_idx];
     pack_shift128(
         &mut buf[WR_CFG_OFFSET + 1 .. WR_CFG_OFFSET + 1 + WR_CFG_WORDS],
         reg, ALL_RGB,
     );
+}
+
+// ── Fill pixels helper ──────────────────────────────────────────────
+
+fn fill_pixels(offset: u8) {
+    let pixels = unsafe { &mut *core::ptr::addr_of_mut!(PIXELS) };
+    for row in 0..64usize {
+        for col in 0..128usize {
+            let hue = (col as u32 * 255 / 127) as u8;
+            pixels[row][col] = hsv(hue.wrapping_add(offset));
+        }
+    }
+}
+
+// ── SIO FIFO raw register access ────────────────────────────────────
+// After Multicore::new() consumes the HAL SioFifo, both cores use
+// raw register access for inter-core communication.
+
+fn fifo_write(val: u32) {
+    unsafe {
+        while (0xD000_0050 as *const u32).read_volatile() & 2 == 0 {}
+        (0xD000_0054 as *mut u32).write_volatile(val);
+        cortex_m::asm::sev();
+    }
+}
+
+fn fifo_try_read() -> Option<u32> {
+    unsafe {
+        if (0xD000_0050 as *const u32).read_volatile() & 1 != 0 {
+            Some((0xD000_0058 as *const u32).read_volatile())
+        } else {
+            None
+        }
+    }
+}
+
+fn fifo_read() -> u32 {
+    unsafe {
+        loop {
+            if (0xD000_0050 as *const u32).read_volatile() & 1 != 0 {
+                return (0xD000_0058 as *const u32).read_volatile();
+            }
+            cortex_m::asm::wfe(); // sleep until event
+        }
+    }
+}
+
+// ── Core 1 task ─────────────────────────────────────────────────────
+
+fn core1_task() {
+    loop {
+        let msg = fifo_read();
+        let offset = (msg & 0xFF) as u8;
+        let buf_idx = ((msg >> 8) & 1) as u8;
+
+        let buf = if buf_idx == 0 {
+            unsafe { &mut *core::ptr::addr_of_mut!(FRAME_BUF_A) }
+        } else {
+            unsafe { &mut *core::ptr::addr_of_mut!(FRAME_BUF_B) }
+        };
+
+        // Fill pixels with scrolling rainbow
+        fill_pixels(offset);
+
+        // Pack into target buffer
+        pack_pixels(buf);
+
+        // Update WR_CFG in the target buffer
+        update_wr_cfg(buf, (offset as usize / 2) % 13);
+
+        // Signal done
+        fifo_write(1);
+    }
 }
 
 // ── SM enable/disable + pindir handover ─────────────────────────────
@@ -335,7 +417,7 @@ fn main() -> ! {
     ).unwrap();
 
     // ── 2. Pins ──────────────────────────────────────────────────────
-    let sio_hal = hal::Sio::new(pac.SIO);
+    let mut sio_hal = hal::Sio::new(pac.SIO);
     let pins = hal::gpio::Pins::new(
         pac.IO_BANK0, pac.PADS_BANK0, sio_hal.gpio_bank0, &mut pac.RESETS,
     );
@@ -496,17 +578,33 @@ fn main() -> ! {
     let mut data_tx = data_tx;
     let mut scan_tx = scan_tx;
 
-    defmt::info!("DP3364S S-PWM (dual PIO, per-pixel colour) starting");
+    defmt::info!("DP3364S S-PWM (dual-core, double-buffered) starting");
 
-    // ── 6. Init frame headers + startup flush ──────────────────────
-    init_frame_headers();
-    // PIXELS is all-black from static init; pack it for flush frames.
-    pack_pixels();
+    // ── 6. Init frame headers + initial pixel fill ───────────────────
+    init_frame_headers(unsafe { &mut *core::ptr::addr_of_mut!(FRAME_BUF_A) });
+    init_frame_headers(unsafe { &mut *core::ptr::addr_of_mut!(FRAME_BUF_B) });
+
+    // Initial fill into buffer A (PIXELS is all-black from static init,
+    // but we fill with offset 0 for consistency with the main loop).
+    fill_pixels(0);
+    pack_pixels(unsafe { &mut *core::ptr::addr_of_mut!(FRAME_BUF_A) });
+
+    // ── 7. Spawn core 1 ──────────────────────────────────────────────
+    let mut mc = hal::multicore::Multicore::new(
+        &mut pac.PSM, &mut pac.PPB, &mut sio_hal.fifo,
+    );
+    let cores = mc.cores();
+    cores[1].spawn(unsafe { CORE1_STACK.take().unwrap() }, core1_task).unwrap();
+
+    // ── 8. Startup flush using buffer A ──────────────────────────────
     for flush in 0..14u32 {
         if (flush as usize) < CONFIG_REGS.len() {
-            update_wr_cfg(flush as usize);
+            update_wr_cfg(
+                unsafe { &mut *core::ptr::addr_of_mut!(FRAME_BUF_A) },
+                flush as usize,
+            );
         }
-        let buf = unsafe { &*core::ptr::addr_of!(FRAME_BUF) };
+        let buf = unsafe { &*core::ptr::addr_of!(FRAME_BUF_A) };
         let cfg = single_buffer::Config::new(data_ch, buf, data_tx);
         let xfer = cfg.start();
         let (ch, _, new_tx) = xfer.wait();
@@ -532,84 +630,91 @@ fn main() -> ! {
     }
     defmt::info!("flush complete");
 
-    // ── 7. Main loop — scrolling HSV rainbow ─────────────────────
+    // ── 9. Main loop — dual-core double-buffered ─────────────────────
     //
-    // The data phase is split into DATA_CHUNKS smaller bursts, with
-    // a full scan pass between each. This keeps the display lit
-    // during most of the frame — dark gaps shrink from ~2.6 ms (one
-    // big burst) to ~0.65 ms each (4 chunks). The chip's SRAM is
-    // double-buffered by VSYNC, so partial updates don't cause
-    // tearing: the display shows the previous committed frame until
-    // the next VSYNC.
-    //
-    // CPU packs the next frame during the first scan pass (overlap).
+    // Core 0 DMAs the active buffer while core 1 packs the inactive
+    // buffer. After both finish, swap. No tearing, no dark gaps from
+    // packing.
+    let mut active_buf: u8 = 0; // 0 = A is display buffer, 1 = B
     let mut offset: u8 = 0;
-    let mut reg_idx: usize = 0;
 
-    // Pack initial frame.
+    // Kick off core 1 with the first pack job
+    offset = offset.wrapping_add(2);
+    let mut core1_buf: u8 = 1 - active_buf;
+    fifo_write(offset as u32 | ((core1_buf as u32) << 8));
+    let mut core1_done = false;
+
+    // Do the initial data load (SM0 already enabled)
     {
-        let pixels = unsafe { &mut *core::ptr::addr_of_mut!(PIXELS) };
-        for row in 0..64usize {
-            for col in 0..128usize {
-                let hue = (col as u32 * 255 / 127) as u8;
-                pixels[row][col] = hsv(hue);
-            }
-        }
-    }
-    pack_pixels();
-
-    loop {
-        // ── Data phase (full buffer including WR_CFG) ────────────
-        update_wr_cfg(reg_idx);
-        reg_idx = (reg_idx + 1) % CONFIG_REGS.len();
-
-        let buf = unsafe { &*core::ptr::addr_of!(FRAME_BUF) };
-        let data_cfg = single_buffer::Config::new(
-            data_ch, buf, data_tx,
-        );
+        let buf = if active_buf == 0 {
+            unsafe { &*core::ptr::addr_of!(FRAME_BUF_A) }
+        } else {
+            unsafe { &*core::ptr::addr_of!(FRAME_BUF_B) }
+        };
+        let data_cfg = single_buffer::Config::new(data_ch, buf, data_tx);
         let data_xfer = data_cfg.start();
         let (ch, _, new_tx) = data_xfer.wait();
         data_ch = ch;
         data_tx = new_tx;
         wait_txstall(SM0_TXSTALL);
+    }
 
-        // ── Handover to scan ─────────────────────────────────────
-        release_sm0_clk_lat();
-        disable_sm(SM0_EN);
-        claim_sm1_clk();
+    // Handover to scan — SM1 stays active from here
+    release_sm0_clk_lat();
+    disable_sm(SM0_EN);
+    claim_sm1_clk();
+    enable_sm(SM1_EN);
+
+    loop {
+        // ── Scan one full pass (32 rows) ─────────────────────────
         let scan = unsafe { &*core::ptr::addr_of!(SCAN_BUF) };
-        let scan_cfg = single_buffer::Config::new(
-            scan_ch, scan, scan_tx,
-        );
+        let scan_cfg = single_buffer::Config::new(scan_ch, scan, scan_tx);
         let scan_xfer = scan_cfg.start();
-        enable_sm(SM1_EN);
-
-        // ── CPU packs next frame WHILE SM1 scans ─────────────────
-        // DISPLAY_CYCLES is sized so scan outlasts pack. If pack
-        // finishes first, CPU idles until scan completes — display
-        // stays lit the whole time. No extra dark gap.
-        offset = offset.wrapping_add(2);
-        {
-            let pixels = unsafe {
-                &mut *core::ptr::addr_of_mut!(PIXELS)
-            };
-            for row in 0..64usize {
-                for col in 0..128usize {
-                    let hue = (col as u32 * 255 / 127) as u8;
-                    pixels[row][col] = hsv(hue.wrapping_add(offset));
-                }
-            }
-        }
-        pack_pixels();
-
-        // ── Wait for scan, handover back to data ─────────────────
         let (ch, _, new_tx) = scan_xfer.wait();
         scan_ch = ch;
         scan_tx = new_tx;
         wait_txstall(SM1_TXSTALL);
-        release_sm1_clk();
-        disable_sm(SM1_EN);
-        claim_sm0_clk_lat();
-        enable_sm(SM0_EN);
+
+        // ── Check if core 1 finished packing ─────────────────────
+        if !core1_done {
+            if fifo_try_read().is_some() {
+                core1_done = true;
+            }
+        }
+
+        // ── If new frame ready, briefly load it then resume scan ─
+        if core1_done {
+            // Handover to SM0 for data load
+            release_sm1_clk();
+            disable_sm(SM1_EN);
+            claim_sm0_clk_lat();
+            enable_sm(SM0_EN);
+
+            // Swap and DMA new data
+            active_buf = core1_buf;
+            let buf = if active_buf == 0 {
+                unsafe { &*core::ptr::addr_of!(FRAME_BUF_A) }
+            } else {
+                unsafe { &*core::ptr::addr_of!(FRAME_BUF_B) }
+            };
+            let data_cfg = single_buffer::Config::new(data_ch, buf, data_tx);
+            let data_xfer = data_cfg.start();
+            let (ch, _, new_tx) = data_xfer.wait();
+            data_ch = ch;
+            data_tx = new_tx;
+            wait_txstall(SM0_TXSTALL);
+
+            // Handover back to scan
+            release_sm0_clk_lat();
+            disable_sm(SM0_EN);
+            claim_sm1_clk();
+            enable_sm(SM1_EN);
+
+            // Kick off next pack job on core 1
+            offset = offset.wrapping_add(2);
+            core1_buf = 1 - active_buf;
+            fifo_write(offset as u32 | ((core1_buf as u32) << 8));
+            core1_done = false;
+        }
     }
 }
