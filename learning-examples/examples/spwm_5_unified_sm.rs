@@ -1,26 +1,40 @@
-//! # DP3364S S-PWM — Step 5: Unified State Machine
+//! # DP3364S S-PWM — Step 5: Unified State Machine + Ring-mode DMA
 //!
 //! Fifth in the SPWM progression. Builds on `spwm_4_dual_core.rs`.
 //!
-//! **What this step adds:** a single PIO state machine handles both data
-//! loading and scan/display, eliminating the SM handover dark gap that
-//! plagued step 4.
+//! **What this step adds (two changes bundled):**
 //!
-//! **Architecture:** each DMA word starts with a 1-bit type flag. The PIO
-//! program reads this bit and branches: type=0 dispatches to the data
-//! path (shift RGB bits with CLK/LAT), type=1 dispatches to the scan
-//! path (display period, address latch, OE pulse). No SM disable/enable,
-//! no pindir handover, no dark gap.
+//! 1. **Unified PIO state machine.** A single SM handles both data
+//!    loading and scan/display, eliminating the SM handover dark gap
+//!    that plagued step 4. Each DMA word starts with a 1-bit type
+//!    flag; the PIO reads it and branches — type=0 to the data path
+//!    (shift RGB with CLK/LAT), type=1 to the scan path (display
+//!    period, address latch, OE pulse). No SM disable/enable, no
+//!    pindir handover, no dark gap.
+//!
+//! 2. **Ring-mode DMA for the scan loop.** The scan DMA (ch1) uses
+//!    RP2350 ring mode with RING_SIZE=7, wrapping the read address
+//!    every 128 bytes (32 words × 4 bytes) and looping through the
+//!    scan buffer indefinitely in silicon — no CPU touch between
+//!    scan passes.
+//!
+//! Data DMA (ch0) uses the HAL's single_buffer. Only one channel
+//! runs at a time: ch1 is stopped before ch0 sends frame data, then
+//! ch1 is restarted.
 //!
 //! ```text
-//!   Core 0: DMA data → SM → DMA scan (loop) → core 1 done? → DMA new data
-//!           ↑                                    no → keep scanning
-//!           └──────────────────────────────────────────────────────────
+//!   Core 0: start ring scan ch1 → wait core1 → stop ch1
+//!           → DMA data ch0 → restart ch1 → wait core1 → ...
 //!
 //!   Core 1: wait for signal → fill pixels → pack → signal done
 //! ```
 //!
 //! Communication via SIO FIFO (hardware mailbox between cores).
+//!
+//! This file is also the **panel-recovery tool**: if spwm_7 or
+//! spwm_8 leaves the panel's driver chips in a desynchronised state,
+//! flashing this example restores a known-good sync via the W12-OE-
+//! on-scan_line-0 bootstrap.
 //!
 //! ## Run
 //!
@@ -97,7 +111,10 @@ const SETUP_CLK: u32 = 28;
 const OE_CLK_W4: u32 = 4;
 const OE_CLK_W12: u32 = 12;
 
-static mut SCAN_BUF: [u32; SCAN_LINES] = [0u32; SCAN_LINES];
+// ── Scan buffer: 128-byte aligned for DMA ring mode ──────────────────
+#[repr(C, align(128))]
+struct ScanBufAligned([u32; SCAN_LINES]);
+static mut SCAN_BUF: ScanBufAligned = ScanBufAligned([0u32; SCAN_LINES]);
 
 // ── Pixel type and framebuffer ───────────────────────────────────────
 
@@ -162,7 +179,7 @@ fn build_scan_buf() {
     let buf = unsafe { &mut *core::ptr::addr_of_mut!(SCAN_BUF) };
     for row in 0..SCAN_LINES {
         let oe = if row == 0 { OE_CLK_W12 } else { OE_CLK_W4 };
-        buf[row] = scan_word(DISPLAY_CLK, row as u32, SETUP_CLK, oe);
+        buf.0[row] = scan_word(DISPLAY_CLK, row as u32, SETUP_CLK, oe);
     }
 }
 
@@ -201,10 +218,6 @@ fn init_frame_headers(buf: &mut [u32; FRAME_WORDS]) {
 
 /// Pack the PIXELS framebuffer into the given frame buffer's
 /// DATA_LATCH regions.
-///
-/// Gamma-corrected greyscale is precomputed per column (8 chips x
-/// 6 channels = 48 lookups per latch) rather than per pixel-clock
-/// (128 x 6 = 768), cutting gamma lookups from 393 K to 24 K.
 fn pack_pixels(buf: &mut [u32; FRAME_WORDS]) {
     let pixels = unsafe { &*core::ptr::addr_of!(PIXELS) };
 
@@ -349,6 +362,68 @@ fn wait_txstall(sm_stall_bit: u32) {
     }
 }
 
+// ── DMA ring-mode scan (ch1, raw register access) ───────────────────
+
+const DMA_BASE: u32 = 0x5000_0000;
+
+// CH1 registers (offset 0x40 per channel)
+const CH1_READ_ADDR:  *mut u32 = (DMA_BASE + 0x040) as *mut u32;
+const CH1_WRITE_ADDR: *mut u32 = (DMA_BASE + 0x044) as *mut u32;
+const CH1_TRANS_COUNT: *mut u32 = (DMA_BASE + 0x048) as *mut u32;
+const CH1_CTRL_TRIG:  *mut u32 = (DMA_BASE + 0x04C) as *mut u32;
+// AL1 alias — writing TRANS_COUNT_TRIG triggers the channel
+const CH1_AL1_CTRL:   *mut u32 = (DMA_BASE + 0x050) as *mut u32;
+const CH1_AL1_TRANS_COUNT_TRIG: *mut u32 = (DMA_BASE + 0x05C) as *mut u32;
+
+// PIO0 TX FIFO for SM0
+const PIO0_TXF0: u32 = PIO0_BASE + 0x010;
+
+/// Build the CH1 CTRL value for ring-mode scan DMA.
+///
+/// RP2350 DMA CTRL_TRIG register layout (differs from RP2040!):
+/// - EN[0]              = 1  (enable)
+/// - DATA_SIZE[3:2]     = 2  (32-bit transfers)
+/// - INCR_READ[4]       = 1  (increment read through scan buffer)
+/// - INCR_READ_REV[5]   = 0
+/// - INCR_WRITE[6]      = 0  (fixed write to FIFO)
+/// - INCR_WRITE_REV[7]  = 0
+/// - RING_SIZE[11:8]    = 7  (wrap every 2^7 = 128 bytes)
+/// - RING_SEL[12]       = 0  (ring applies to read address)
+/// - CHAIN_TO[16:13]    = 1  (chain to self = no-op)
+/// - TREQ_SEL[22:17]    = 0  (DREQ = PIO0_TX0)
+const CH1_CTRL_VAL: u32 =
+    (1 << 0)        // EN
+    | (2 << 2)      // DATA_SIZE = 32-bit
+    | (1 << 4)      // INCR_READ
+    | (7 << 8)      // RING_SIZE = 7
+    | (1 << 13)     // CHAIN_TO = 1 (self)
+    | (0 << 17);    // TREQ_SEL = PIO0_TX0
+
+/// Start ring-mode scan DMA on ch1. Runs forever (or until stopped).
+fn start_ring_scan() {
+    let scan_addr = core::ptr::addr_of!(SCAN_BUF) as u32;
+    unsafe {
+        // Configure CTRL via AL1 (no trigger)
+        CH1_AL1_CTRL.write_volatile(CH1_CTRL_VAL);
+        CH1_READ_ADDR.write_volatile(scan_addr);
+        CH1_WRITE_ADDR.write_volatile(PIO0_TXF0);
+        // Trigger via AL1_TRANS_COUNT_TRIG
+        CH1_AL1_TRANS_COUNT_TRIG.write_volatile((15 << 28) | 32);
+    }
+}
+
+/// Stop ring-mode scan DMA on ch1.
+fn stop_ring_scan() {
+    unsafe {
+        // Must use CHAN_ABORT — clearing EN only pauses (BUSY stays high)
+        const CHAN_ABORT: *mut u32 = (DMA_BASE + 0x464) as *mut u32;
+        CHAN_ABORT.write_volatile(1 << 1);
+        while CHAN_ABORT.read_volatile() & (1 << 1) != 0 {
+            cortex_m::asm::nop();
+        }
+    }
+}
+
 // ── Entry point ──────────────────────────────────────────────────────
 
 #[hal::entry]
@@ -414,99 +489,67 @@ fn main() -> ! {
 
     // ── DISPATCH (wrap_target) ───────────────────────────────────
     a.bind(&mut dispatch);
-    // 0: out x, 1 side 0b00            ; read type bit
     a.out_with_side_set(pio::OutDestination::X, 1, 0b00);
-    // 1: jmp !x data_cmd side 0b00     ; type=0 → data
     a.jmp_with_side_set(pio::JmpCondition::XIsZero, &mut data_cmd, 0b00);
 
     // ── SCAN (type=1) ────────────────────────────────────────────
-    // 2: out y, 7 side 0b00            ; display_count-1
     a.out_with_side_set(pio::OutDestination::Y, 7, 0b00);
-    // 3: display loop start
     a.bind(&mut display_lp);
-    // 3: mov y, y side 0b00            ; NOP
     a.mov_with_side_set(
         pio::MovDestination::Y, pio::MovOperation::None,
         pio::MovSource::Y, 0b00,
     );
-    // 4: mov y, y side 0b00            ; NOP
     a.mov_with_side_set(
         pio::MovDestination::Y, pio::MovOperation::None,
         pio::MovSource::Y, 0b00,
     );
-    // 5: jmp y-- display_lp side 0b01  ; CLK high
     a.jmp_with_side_set(pio::JmpCondition::YDecNonZero, &mut display_lp, 0b01);
 
-    // 6: out pins, 11 side 0b00        ; ADDR to GPIO 6-10 (zeros to RGB 0-5)
     a.out_with_side_set(pio::OutDestination::PINS, 11, 0b00);
-    // 7: out y, 5 side 0b00            ; setup_count-1
     a.out_with_side_set(pio::OutDestination::Y, 5, 0b00);
 
-    // 8: setup loop
     a.bind(&mut setup_lp);
-    // 8: mov y, y side 0b00            ; NOP
     a.mov_with_side_set(
         pio::MovDestination::Y, pio::MovOperation::None,
         pio::MovSource::Y, 0b00,
     );
-    // 9: mov y, y side 0b00            ; NOP
     a.mov_with_side_set(
         pio::MovDestination::Y, pio::MovOperation::None,
         pio::MovSource::Y, 0b00,
     );
-    // 10: jmp y-- setup_lp side 0b01   ; CLK high
     a.jmp_with_side_set(pio::JmpCondition::YDecNonZero, &mut setup_lp, 0b01);
 
-    // 11: out y, 4 side 0b00           ; oe_count-1
     a.out_with_side_set(pio::OutDestination::Y, 4, 0b00);
-    // 12: set pins, 1 side 0b00        ; OE high
     a.set_with_side_set(pio::SetDestination::PINS, 1, 0b00);
 
-    // 13: OE loop
     a.bind(&mut oe_lp);
-    // 13: mov y, y side 0b00           ; NOP
     a.mov_with_side_set(
         pio::MovDestination::Y, pio::MovOperation::None,
         pio::MovSource::Y, 0b00,
     );
-    // 14: mov y, y side 0b00           ; NOP
     a.mov_with_side_set(
         pio::MovDestination::Y, pio::MovOperation::None,
         pio::MovSource::Y, 0b00,
     );
-    // 15: jmp y-- oe_lp side 0b01      ; CLK high
     a.jmp_with_side_set(pio::JmpCondition::YDecNonZero, &mut oe_lp, 0b01);
 
-    // 16: set pins, 0 side 0b00        ; OE low
     a.set_with_side_set(pio::SetDestination::PINS, 0, 0b00);
-    // 17: out null, 4 side 0b00        ; discard remaining bits
     a.out_with_side_set(pio::OutDestination::NULL, 4, 0b00);
-    // 18: jmp dispatch side 0b00       ; back to dispatch
     a.jmp_with_side_set(pio::JmpCondition::Always, &mut dispatch, 0b00);
 
     // ── DATA (type=0) ────────────────────────────────────────────
     a.bind(&mut data_cmd);
-    // 19: out x, 15 side 0b00          ; N_pre-1 (15 bits since 1 bit was type)
     a.out_with_side_set(pio::OutDestination::X, 15, 0b00);
-    // 20: out y, 16 side 0b00          ; N_lat-1
     a.out_with_side_set(pio::OutDestination::Y, 16, 0b00);
 
-    // 21: pre loop
     a.bind(&mut pre_loop);
-    // 21: out pins, 6 side 0b00        ; RGB, CLK low
     a.out_with_side_set(pio::OutDestination::PINS, 6, 0b00);
-    // 22: out null, 2 side 0b01        ; discard, CLK high
     a.out_with_side_set(pio::OutDestination::NULL, 2, 0b01);
-    // 23: jmp x-- pre_loop side 0b00   ; pre loop
     a.jmp_with_side_set(pio::JmpCondition::XDecNonZero, &mut pre_loop, 0b00);
 
-    // 24: lat loop
     a.bind(&mut lat_loop);
-    // 24: out pins, 6 side 0b10        ; RGB, LAT high, CLK low
     a.out_with_side_set(pio::OutDestination::PINS, 6, 0b10);
-    // 25: out null, 2 side 0b11        ; discard, CLK+LAT high
     a.out_with_side_set(pio::OutDestination::NULL, 2, 0b11);
-    // 26: jmp y-- lat_loop side 0b10   ; lat loop
     a.jmp_with_side_set(pio::JmpCondition::YDecNonZero, &mut lat_loop, 0b10);
     a.bind(&mut wrap_source);
 
@@ -538,11 +581,13 @@ fn main() -> ! {
     let _sm = sm.start();
     let mut tx = tx;
 
-    // ── 5. DMA — single channel feeds unified SM ─────────────────
+    // ── 5. DMA — ch0 for data (HAL), ch1 for ring scan (raw) ────
     let dma = pac.DMA.split(&mut pac.RESETS);
     let mut ch = dma.ch0;
+    // ch1 is used via raw registers only — don't bind it to HAL
+    let _ch1 = dma.ch1;
 
-    defmt::info!("DP3364S S-PWM (unified SM, no dark gap) starting");
+    defmt::info!("DP3364S S-PWM (ring-mode DMA scan) starting");
 
     // ── 6. Init frame headers + initial pixel fill ───────────────
     init_frame_headers(unsafe { &mut *core::ptr::addr_of_mut!(FRAME_BUF_A) });
@@ -574,18 +619,17 @@ fn main() -> ! {
         tx = new_tx;
         wait_txstall(SM0_TXSTALL);
 
-        // Scan a few passes after each flush frame
+        // Scan one pass after each flush frame (HAL single_buffer)
         let scan = unsafe { &*core::ptr::addr_of!(SCAN_BUF) };
-        let scan_cfg = single_buffer::Config::new(ch, scan, tx);
+        let scan_cfg = single_buffer::Config::new(ch, &scan.0, tx);
         let scan_xfer = scan_cfg.start();
-        let (new_ch, _, new_tx) = scan_xfer.wait();
-        ch = new_ch;
-        tx = new_tx;
+        let (new_ch2, _, new_tx2) = scan_xfer.wait();
+        ch = new_ch2;
+        tx = new_tx2;
         wait_txstall(SM0_TXSTALL);
     }
     defmt::info!("flush complete");
 
-    // ── 9. Main loop — unified SM, no dark gap ───────────────────
     let mut active_buf: u8 = 0;
     let mut offset: u8 = 0;
 
@@ -619,23 +663,22 @@ fn main() -> ! {
 
     set_clkdiv(3);
 
-    loop {
-        // ── Scan continuously until core 1 done ──────────────────
-        loop {
-            let scan = unsafe { &*core::ptr::addr_of!(SCAN_BUF) };
-            let scan_cfg = single_buffer::Config::new(ch, scan, tx);
-            let scan_xfer = scan_cfg.start();
-            let (new_ch, _, new_tx) = scan_xfer.wait();
-            ch = new_ch;
-            tx = new_tx;
-            wait_txstall(SM0_TXSTALL);
+    // Start continuous ring-mode scan
+    start_ring_scan();
 
+    loop {
+        // Wait for core 1 to finish packing
+        loop {
             if fifo_try_read().is_some() { break }
+            cortex_m::asm::wfe();
         }
 
         frame_count += 1;
 
-        // ── New frame ready — DMA it (no SM stop/start!) ─────────
+        // Stop scan, load new frame, restart scan
+        stop_ring_scan();
+        wait_txstall(SM0_TXSTALL);
+
         set_clkdiv(2);
         active_buf = core1_buf;
         let buf = if active_buf == 0 {
@@ -651,7 +694,10 @@ fn main() -> ! {
         wait_txstall(SM0_TXSTALL);
         set_clkdiv(3);
 
-        // ── Kick off next pack job ───────────────────────────────
+        // Restart continuous ring-mode scan
+        start_ring_scan();
+
+        // Kick off next pack job
         offset = offset.wrapping_add(2);
         core1_buf = 1 - active_buf;
         fifo_write(offset as u32 | ((core1_buf as u32) << 8));

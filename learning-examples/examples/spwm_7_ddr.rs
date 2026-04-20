@@ -1,6 +1,6 @@
 //! # DP3364S S-PWM — Step 7: DDR (Double Data Rate)
 //!
-//! Seventh in the SPWM progression. Builds on `spwm_6_ring_dma.rs`.
+//! Seventh in the SPWM progression. Builds on `spwm_5_unified_sm.rs`.
 //!
 //! **Status: WORK IN PROGRESS — builds but display is blank.**
 //! The DDR command, PIO program, and data packing are implemented but

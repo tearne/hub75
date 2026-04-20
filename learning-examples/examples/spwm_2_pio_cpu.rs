@@ -1,17 +1,86 @@
 //! # DP3364S S-PWM — Step 2: PIO + DMA with Per-Pixel Colour
 //!
-//! Second in the three-part progression. Builds on `spwm_1_cpu.rs`.
+//! First spwm step. Introduces the DP3364S protocol and offloads the
+//! four commands (VSYNC, PRE_ACT, WR_CFG, DATA_LATCH) to PIO + DMA.
+//! CPU still handles the scan loop (CLK + ROW/OE pulses) via SIO
+//! bitbang, with pin-function switching between PIO and SIO each
+//! frame. Drives a scrolling HSV rainbow with 14-bit per-channel
+//! greyscale + gamma correction.
 //!
-//! **What this step adds:** PIO+DMA replaces CPU bitbang for all four
-//! S-PWM commands (VSYNC, PRE_ACT, WR_CFG, DATA_LATCH). A per-pixel
-//! RGB888 framebuffer with gamma correction drives a scrolling HSV
-//! rainbow. The CPU still handles the scan loop (CLK + ROW/OE pulses)
-//! via SIO bitbang, with pin-function switching between PIO and SIO
-//! each frame.
+//! Step 3 adds a second PIO SM for scan, removing the CPU scan loop
+//! entirely and enabling pack/scan overlap.
 //!
-//! **What step 3 will add:** a second PIO SM for scan, eliminating the
-//! CPU scan loop and enabling pack/scan overlap (display stays lit
-//! during packing).
+//! ## DP3364S protocol reference
+//!
+//! The DP3364S (Shenzhen Developer Microelectronics / Depuw) is an
+//! S-PWM constant-current LED driver. Unlike traditional shift-
+//! register HUB75 drivers (FM6124 etc.) which require host-side BCM
+//! via OE timing, the DP3364S handles brightness internally: it
+//! stores 14-bit greyscale per channel in on-chip SRAM and has a
+//! PLL-driven PWM engine that compares against the stored values.
+//! The host just keeps supplying data and ROW signals.
+//!
+//! The S-PWM protocol reuses the HUB75 pins with different semantics:
+//!
+//! ### Commands encoded by LAT pulse width
+//!
+//! Each command is a data shift where LAT is held HIGH during the
+//! LAST N CLK cycles of the shift (not a separate pulse afterwards).
+//!
+//! | LAT width | Command     | Description                              |
+//! |-----------|-------------|------------------------------------------|
+//! | 1 CLK     | DATA_LATCH  | Store 16-bit greyscale into SRAM         |
+//! | 3 CLK     | VSYNC       | Frame sync — commit data, start new frame|
+//! | 5 CLK     | WR_CFG      | Write one configuration register         |
+//! | 14 CLK    | PRE_ACT     | Enable register writing (precedes WR_CFG)|
+//!
+//! Extra CLK pulses after the shift would push data further through
+//! the daisy chain and corrupt the shift registers — LAT *must*
+//! overlap the last N CLK cycles of the shift, not follow them.
+//!
+//! ### OE pin repurposed as ROW
+//!
+//! OE is NOT an output enable. It's a ROW advance signal:
+//!
+//!   - **W12** (OE HIGH for 12 CLK) — resets to row 0 of the group.
+//!   - **W4**  (OE HIGH for  4 CLK) — advance to next row.
+//!   - ABCDE address lines (GPIO 6–10) select the physical row.
+//!   - Minimum ~128 CLK between ROW pulses.
+//!
+//! ### Frame structure
+//!
+//! One refresh frame:
+//!
+//! ```text
+//!   VSYNC → PRE_ACT → WR_CFG (one register) → DATA_LATCH × 512 → display
+//! ```
+//!
+//! Exactly ONE VSYNC per frame. Two VSYNCs back-to-back commit an
+//! incomplete frame and break the data load. The display also can't
+//! be sustained by CLK + ROW alone — the chip needs continuous VSYNC
+//! + data reload, or the frame fades within one period.
+//!
+//! ### Config registers
+//!
+//! 13 registers, one WR_CFG per frame. No separate init phase — they
+//! can be written interleaved with normal data refresh from cold.
+//! Format: `{addr[15:8], value[7:0]}`.
+//!
+//! ### Data transfer (our panel: 64×128, 1/32 scan)
+//!
+//!   - 8 DP3364S chips per colour chain (128 pixels ÷ 16 outputs).
+//!   - 6 parallel chains: R0 G0 B0 (upper half) + R1 G1 B1 (lower).
+//!   - Each DATA_LATCH shifts 128 bits (8 chips × 16), MSB first.
+//!   - 512 DATA_LATCH ops per frame (32 scan_lines × 16 channels).
+//!   - 16-bit greyscale, lower 14 bits used.
+//!
+//! ### References
+//!
+//!   - DP3264S datasheet (translated):
+//!     <https://cognigraph.com/6502/datasheet-DP3264S-google-translate.pdf>
+//!   - DMD_STM32 (working DP3264 driver, inspired protocol details):
+//!     <https://github.com/board707/DMD_STM32>
+//!   - Depuw (manufacturer): <http://www.depuw.com/>
 //!
 //! ## PIO program (8 instructions)
 //!
