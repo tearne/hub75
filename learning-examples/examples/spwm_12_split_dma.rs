@@ -1,4 +1,4 @@
-//! # DP3364S S-PWM — Step 12: split DMA (E19)
+//! # DP3364S S-PWM — Step 12: split DMA (echo investigation, HISTORICAL)
 //!
 //! Twelfth in the SPWM progression. Copied from spwm_11 (unrotated
 //! post-scan, `POST_SCAN_CYCLES = 50`) and modified to emit each frame
@@ -11,41 +11,191 @@
 //!   wait_txstall
 //! ```
 //!
-//! ## Motivation
+//! ## Role in the investigation (now closed)
 //!
-//! E17 (cycles sweep in spwm_11) produced a surprising null: echo
-//! intensity did not scale with wraps-per-frame from 50 → 3 cycles.
-//! That rules out the "accumulation over many intra-post-scan 31 → 0
-//! boundaries" theory. The echo is more plausibly **one strong event
-//! per frame**, most likely at the DATA_LATCH (last = scan_line 31)
-//! → post-scan (first = scan_line 0) adjacency — the only 31 → 0
-//! transition that happens deterministically once per frame,
-//! regardless of cycle count.
+//! This file was the diagnostic vehicle for the scan_line-31 → scan_line-0
+//! echo. It is the simplest program that reliably reproduces the echo,
+//! so E21–E25 were implemented here to probe individual hypotheses. The
+//! investigation is now **complete** — see spwm_15 for the resolution.
+//! This file is preserved as the historical echo reproducer and for the
+//! experiment log in the E21–E25 sections below.
 //!
-//! spwm_4 has no echo. Its architecture naturally separates the
-//! DATA_LATCH and post-scan phases with a DMA-reconfigure gap; that
-//! gap is our best guess for why spwm_4 is clean. E19 reproduces
-//! exactly that gap inside spwm_11's otherwise-unchanged architecture.
+//! **Bottom line:** the echo came from our **unified PIO program with
+//! type-bit dispatch**. Replacing that with two separate PIO programs
+//! swapped on the same SM at each phase boundary (spwm_15) eliminated
+//! the echo entirely. Details in spwm_15's header.
 //!
-//! ## Prediction
+//! ## E19 result (the original purpose of this file)
 //!
-//! Inserting a `wait_txstall` between the data and post-scan DMAs
-//! should break the DATA → SCAN adjacency. The pipeline drains, the
-//! chip's internal state settles, and no data leaks onto scan_line 0.
+//! **Echo still visible.** Inserting `wait_txstall` between the data
+//! and post-scan DMAs did not eliminate the scan_line 31 → scan_line 0
+//! leak. Pipeline-drain at the MCU side is not sufficient. That ruled
+//! out the "DATA → SCAN boundary adjacency" hypothesis at the
+//! coarse-grained level. Further null results accumulated in E17,
+//! E18, E20 and the other toggles already in this file (see the
+//! consts `INTER_DMA_DELAY_CYCLES`, `INTER_DMA_INJECT`,
+//! `INTER_DMA_HIGHZ_CYCLES`).
 //!
-//! - **Echo gone** (rows 0 / 32 fully black): hypothesis confirmed;
-//!   this is our architectural fix. FPS impact from ~2× DMA dispatch
-//!   overhead is negligible (~µs on ~16.7 ms frames).
-//! - **Echo still visible**: the mechanism is not at the DATA → SCAN
-//!   boundary. Most likely next step is E21 (pack-time compensation)
-//!   as a deterministic workaround since the echo landing spot is
-//!   known and fixed.
+//! ## E21–E25 diagnostic sweep
 //!
-//! ## Test pattern
+//! Motivation: between spwm_12 (echo) and spwm_14 (clean), the
+//! not-yet-individually-isolated variables are PIO state carryover,
+//! TX FIFO residue, single vs dual DMA channel, and unified vs
+//! separate PIO programs. The spwm_15 refactor targets the last one
+//! but is expensive to execute. These five cheaper experiments narrow
+//! the hypothesis space first. Each is a small localised change to
+//! spwm_12.
 //!
-//! Unchanged from spwm_11 — row 31 cyan, row 63 yellow. Echo (if any)
-//! appears on row 0 / 32. `POST_SCAN_CYCLES` stays at 50 so per-row
-//! refresh is the flicker-free 3 kHz.
+//! Record for each: **Status** (not run / run / ongoing) and
+//! **Observation** (echo unchanged / reduced / eliminated / other).
+//!
+//! ### E21 — SM_RESTART between phases
+//! Write `PIO0_CTRL.SM_RESTART` bit 4 (SM0) after `wait_txstall` and
+//! before the post-scan DMA. Per RP2350 datasheet §12.5, this clears:
+//! the input and output shift counters, the ISR contents, the delay
+//! counter, the waiting-on-IRQ state, any stalled instruction, any
+//! stalled OUT/PULL/IN/PUSH due to full-empty FIFOs, and the status
+//! register. It does **not** clear X, Y, OSR contents, the FIFOs
+//! themselves, or the PC.
+//!
+//! - **Prediction:** if the echo is caused by carryover of any of the
+//!   things this clears (most likely the output shift counter, since
+//!   autopull state could plausibly misalign the scan phase's first
+//!   OUT), echo disappears.
+//! - **Implementation:** const `E21_SM_RESTART` (0/1); when 1,
+//!   `restart_sm(SM0_RESTART)` fires between data-phase `disable_sm`
+//!   and the inter-DMA toggles. Compared against `echo_baseline`
+//!   (same architecture, no E21) by flashing both in turn.
+//! - **Status:** run 2026-04-21 (both modes flashed against each
+//!   other, panel reset via `panel_reset` between runs).
+//! - **Observation:** **echo still present, no perceptible change
+//!   from baseline.** Prediction falsified. The echo is not caused
+//!   by carryover of any of the state `SM_RESTART` clears: input/
+//!   output shift counters, ISR, delay counter, waiting-on-IRQ
+//!   state, stalled instructions, stalled FIFO ops, or the status
+//!   register. Remaining PIO-internal suspects are the X/Y scratch
+//!   registers and OSR content — exactly what E22 targets.
+//!
+//! ### E22 — explicit OSR / X / Y scrub via SMx_INSTR
+//! Force-execute `MOV OSR, NULL`, `MOV X, NULL`, `MOV Y, NULL` via
+//! `SM0_INSTR` at the phase boundary, while the SM is running-but-
+//! stalled on autopull (before `disable_sm`). Reaches X, Y, OSR
+//! content — the scratch state `SM_RESTART` specifically leaves
+//! alone. Writes to `SMx_INSTR` override the stalled instruction
+//! in the next PIO cycle; a short `delay(10)` between writes
+//! (~67 ns at 150 MHz, ~5 PIO cycles at 75 MHz) ensures each scrub
+//! executes before the next overwrites.
+//!
+//! - **Prediction (initial):** if residue in OSR / X / Y carries the
+//!   echo, scrubbing all three eliminates it.
+//! - **Status:** abandoned 2026-04-21 — experiment design was flawed.
+//! - **Observation:** panel went blank, scan phase visibly broken.
+//!   Diagnosis: `MOV OSR, NULL` resets the output shift counter to
+//!   0 as a side effect, which un-stalls the SM from its autopull
+//!   wait. The SM then executes pending instructions using zero
+//!   data as command bytes (consuming 32 zero bits through dispatch
+//!   / data_cmd), stuffing X=0 Y=0 and stalling at a different
+//!   point in data_cmd's `out Y, 16`. When the scan DMA starts,
+//!   scan words get interpreted as data-command payload bits,
+//!   producing nonsense on the pins.
+//! - **Deeper conclusion:** the experiment was testing state that
+//!   can't actually carry the echo. OSR is strictly consumed by
+//!   OUT instructions — every bit is output exactly once, and at
+//!   stall time the counter is 32 (OSR fully drained). There is
+//!   no residue. X and Y are overwritten by `out X, ...` /
+//!   `out Y, ...` at the top of the data path before use, so
+//!   residue there is also inert. Combined with the E21 null, all
+//!   plausible per-SM internal state is now exonerated. Focus
+//!   should shift to what happens **outside** the PIO — the FIFO
+//!   (E23 sanity check), the chip-side shift registers (E24), or
+//!   the spatial nature of the leak (E25).
+//!
+//! ### E23 — FIFO-empty assertion post-stall (SKIPPED)
+//! Would have confirmed our assumption that wait_txstall implies the
+//! TX FIFO is genuinely empty. Skipped because E21's null already
+//! indirectly confirms the autopull-stall state; E25 then made this
+//! irrelevant by showing the leak is chip-side.
+//!
+//! ### E24 — dummy drain words between phases (SKIPPED)
+//! Would have tested chip-side shift-register residue by clocking
+//! extra zero DATA_LATCHes between data and scan. Skipped because
+//! E25's finding (echo is per-column SRAM-level, preserving colour
+//! exactly, no smear) argues strongly against a serial-chain mechanism
+//! — bits stuck in a shift register would produce smearing, not
+//! 1:1 column-preserved mirroring. The pipeline-continuity hypothesis
+//! was then validated architecturally by spwm_15's success.
+//!
+//! ### E25 — colour-asymmetric / spatial test patterns
+//! Replace the uniform-per-row pattern with spatially distinct
+//! blocks so the echo's structure is readable. Current E25 pattern:
+//!
+//! |              | cols 0-63 | cols 64-127 |
+//! | ------------ | --------- | ----------- |
+//! | row 31       | RED       | BLUE        |
+//! | row 63       | GREEN     | YELLOW      |
+//!
+//! Shape of the echo on rows 0 / 32 narrows the mechanism —
+//! per-column SRAM leak, serial shift-register leak, cross-half
+//! bleed, column-selective, etc. See `fill_pixels` docstring for
+//! the full decision table.
+//!
+//! - **Implementation:** modified `fill_pixels` in both spwm_12
+//!   and echo_baseline to emit the four-block pattern. No other
+//!   code changes.
+//! - **Status:** run 2026-04-21.
+//! - **Observation:** four colours on the source rows; echo on the
+//!   target rows **exactly mirrors** the source rows' colour and
+//!   column layout. Row 0: left-half faint red, right-half faint
+//!   blue, sharp boundary at col 64. Row 32: left-half faint
+//!   green, right-half faint yellow, same sharp boundary. No
+//!   colour mixing, no smearing, no horizontal shift, no cross-
+//!   half bleed, intensity uniform across each half.
+//! - **Conclusion:** the echo is a **per-column, SRAM-address-
+//!   level leak**. Column N of scan_line 31's SRAM bleeds into
+//!   column N of scan_line 0's SRAM (upper half); similarly for
+//!   63 → 32 (lower half). Each colour channel is preserved
+//!   exactly. The mechanism operates on individual SRAM cells in
+//!   1:1 column correspondence.
+//!
+//!   **Rules out:**
+//!     - serial shift-register leak (would smear / shift the
+//!       boundary at col 64);
+//!     - cross-half bleed (upper source → lower target, etc.);
+//!     - colour-channel-specific mechanism (all channels echo
+//!       equally);
+//!     - column-selective mechanism (all 128 columns affected
+//!       uniformly).
+//!
+//!   **Remaining hypothesis space** is chip-internal, specific to
+//!   the scan_line 31 ↔ 0 (and 63 ↔ 32) SRAM address pair. Most
+//!   plausible: the DP3364S's address wrap/decode during the
+//!   last DATA_LATCH of scan_line 31 does something that causes
+//!   scan_line 0's SRAM cells to be written as well. This cannot
+//!   be the MCU pipeline: our command stream is data-correct and
+//!   per-column, so the chip is receiving correct bits for
+//!   scan_line 31 and somehow also writing scan_line 0 from those
+//!   same bits.
+//!
+//! ## Final outcome
+//!
+//! The cheap diagnostics (E21, E25) ruled MCU-side state in/out and
+//! localised the mechanism to a chip-internal per-column SRAM leak at
+//! command-stream wrap points. The spwm_15 refactor (single SM with
+//! two separate PIO programs, swapped at phase boundaries) was then
+//! confirmed on-panel to eliminate the echo entirely, while retaining
+//! the flicker-reduction goal (no ~2.6 ms dual-SM dark gap). The
+//! distinguishing variable was **unified-program-with-type-bit-dispatch
+//! vs separate-programs-with-distinct-wrap-regions** — not single-SM
+//! vs dual-SM as originally framed.
+//!
+//! ## Test pattern (current — E25)
+//!
+//! Row 31: cols 0-63 red, cols 64-127 blue.
+//! Row 63: cols 0-63 green, cols 64-127 yellow.
+//! Echo (if any) lands on row 0 (upper target) and row 32 (lower
+//! target). `POST_SCAN_CYCLES` stays at 50 for per-row refresh
+//! around 3 kHz. See `fill_pixels` docstring for how to read the
+//! echo shape.
 //!
 //! ```sh
 //! cargo run --release --example spwm_12_split_dma
@@ -385,26 +535,37 @@ fn update_wr_cfg(buf: &mut [u32; FRAME_WORDS], reg_idx: usize) {
 
 // ── Fill pixels helper ──────────────────────────────────────────────
 
-/// Echo-diagnostic pattern for E17. Unrotated architecture →
-/// every wrap is 31 → 0 → echo lands on row 0 / 32. All black
-/// except the bright source rows:
-///   - row 31 cyan    (upper wrap source)
-///   - row 63 yellow  (lower wrap source)
+/// E25 diagnostic pattern. Four distinct colour-blocks on the two
+/// source rows so the echo's spatial and colour structure is
+/// readable:
 ///
-/// Rate the echo on row 0 (cyan) and row 32 (yellow) for the current
-/// POST_SCAN_CYCLES setting.
+/// |            | cols 0-63 | cols 64-127 |
+/// | ---------- | --------- | ----------- |
+/// | row 31 (upper source) | RED    | BLUE    |
+/// | row 63 (lower source) | GREEN  | YELLOW  |
+///
+/// Read the echo on row 0 (upper target) and row 32 (lower target):
+///   - Same colour per half, same column boundary at col 64 →
+///     per-column SRAM-address leak.
+///   - Colours preserved but column boundary shifted or smeared →
+///     serial shift-register leak inside the driver chips.
+///   - Wrong colours (e.g. left-half green on row 0) → cross-half
+///     bleed or colour-channel-specific mechanism.
+///   - Echo strong on some columns, absent on others → column-
+///     selective mechanism (investigate which).
 fn fill_pixels(_offset: u8) {
     let pixels = unsafe { &mut *core::ptr::addr_of_mut!(PIXELS) };
     for row in 0..64usize {
-        let c = if row == 31 {
-            Rgb::new(255, 0, 0)       // upper wrap source — red
-        } else if row == 63 {
-            Rgb::new(0, 255, 0)       // lower wrap source — green
-        } else {
-            Rgb::BLACK
-        };
         for col in 0..128usize {
-            pixels[row][col] = c;
+            pixels[row][col] = if row == 31 {
+                if col < 64 { Rgb::new(255, 0, 0) }       // red
+                else        { Rgb::new(0, 0, 255) }       // blue
+            } else if row == 63 {
+                if col < 64 { Rgb::new(0, 255, 0) }       // green
+                else        { Rgb::new(255, 255, 0) }     // yellow
+            } else {
+                Rgb::BLACK
+            };
         }
     }
 }

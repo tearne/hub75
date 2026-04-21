@@ -1,117 +1,164 @@
-//! # DP3364S S-PWM — Step 15: single-SM port of spwm_4 (STUB)
+//! # DP3364S S-PWM — Step 15: single-SM with separate PIO programs
 //!
-//! Fifteenth in the SPWM progression. **STARTING POINT** for resuming
-//! the echo investigation. This file is currently an unmodified copy
-//! of `spwm_14_no_pin_handover` (which is spwm_4 with the four pindir
-//! handover functions stubbed out). Left unmodified so it flashes and
-//! runs as a dual-SM no-echo baseline — refactor to single-SM starts
-//! here.
+//! Fifteenth in the SPWM progression. **Confirmed working** — a single
+//! SM0 running two PIO programs (swapped at each data↔scan phase
+//! boundary) drives the panel **without the scan_line-31 → scan_line-0
+//! echo** that spwm_12 exhibits, and **without the ~2.6 ms dual-SM
+//! handover dark gap** that limits spwm_14.
 //!
-//! ## The question this file needs to answer
+//! ## Confirmed result (2026-04-21)
 //!
-//! Is a genuinely single-SM architecture capable of driving this chip
-//! **without the scan_line 31 → scan_line 0 echo**, or does two SMs
-//! matter structurally for reasons we don't yet understand?
+//! Under E25's four-colour test pattern (row 31 RED/BLUE, row 63
+//! GREEN/YELLOW), the source rows display cleanly and rows 0 / 32
+//! show **no echo at all** — neither colour nor faint mirror. The
+//! architectural prediction from the E21–E25 investigation held.
 //!
-//! ## The investigation so far (2026-04-20)
+//! ## What the investigation revealed
 //!
-//! **Echo symptom:** in spwm_12's single-SM continuous-DMA architecture
-//! with unified-dispatch PIO, scan_line 31's data leaks onto scan_line
-//! 0 at display time. Slot-31 → slot-0 SRAM-level leak, deterministic,
-//! and specific to spwm_12's architecture.
+//! The echo distinguishing variable was **not** "single SM vs dual
+//! SM" as originally framed. The actual distinguishing variable was
+//! **unified PIO program with type-bit dispatch (spwm_12) vs two
+//! separate PIO programs with distinct wrap regions (spwm_4/14/15)**.
+//! spwm_4 and spwm_14 happen to be dual-SM, which hid the real
+//! variable; spwm_15 demonstrates that single-SM-with-separate-
+//! programs also works, ruling out dual-SM as the necessary condition.
 //!
-//! **Baseline established:** spwm_4 / spwm_13 (dual-SM with separate
-//! data and scan PIO programs) shows **no echo** on the same panel
-//! with the same test pattern (row 31 red, row 63 green). So the echo
-//! is a property of our single-SM approach, not the chip or panel.
+//! **Mechanism, still partially open.** The chip sees something about
+//! the separate-programs architecture — a discontinuity, a CLK-idle,
+//! a different edge pattern — as the "pipeline reset" it needs to
+//! cleanly terminate each scan_word. Under unified dispatch there is
+//! no such discontinuity; the command stream flows continuously and
+//! scan_line 31's data bleeds into scan_line 0's SRAM. Why exactly
+//! the program-swap looks different to the chip is the interesting
+//! follow-up question.
 //!
-//! **Variables isolated between spwm_12 (echo) and spwm_14 (no echo):**
+//! ## Open observation — brightness
 //!
-//! | Variable                                    | Tested? | Matters? |
-//! |---------------------------------------------|---------|----------|
-//! | Command-stream adjacency / wrap count       | yes     | no       |
-//! | Gap duration between data and scan          | yes     | no       |
-//! | Injected VSYNC / PRE_ACT between phases     | yes     | no       |
-//! | Pin high-Z release on CLK/LAT between phases| yes     | no       |
-//! | W12 on Group 0 Line 0 only vs every group   | yes     | no       |
-//! | SYNC_MODE register (0x0C08 → 0x0C88)        | yes     | no       |
-//! | DISSHD_TIME_1 (0x0534 → 0x0504, matches sp4)| yes     | no       |
-//! | GROUP_SET (0x037F → 0x0331)                 | yes     | no       |
-//! | Clkdiv switching (2 for data, 3 for scan)   | yes     | no       |
-//! | SM disable/enable between DMAs              | yes     | no       |
-//! | Per-group 32-word scan DMAs vs 1-big-DMA    | yes     | no       |
-//! | Pindir handover between dual SMs (E20)      | yes     | no       |
+//! spwm_15 appears **slightly dimmer** than spwm_14 at a glance, but
+//! on thin test lines this is hard to judge. Worth a proper side-by-
+//! side comparison under realistic load (full-frame image, not just
+//! source-row lines) before calling the architecture finished.
 //!
-//! **Still genuinely different:**
-//! - spwm_14 uses two separate, SM-specific PIO programs (data-only
-//!   on SM0, scan-only on SM1). spwm_12 uses a unified PIO program
-//!   with a type-bit dispatch mechanism.
-//! - spwm_14 uses two DMA channels. spwm_12 uses one.
+//! ## Why single-SM matters (project goal context)
 //!
-//! ## Plan for tomorrow
+//! Project goal ranking: **flicker > brightness > framerate**. Dual-SM
+//! designs like spwm_14 impose a ~2.6 ms dark gap on every data load
+//! (SM0/SM1 handover on the shared CLK pin). At high pack rates that
+//! averages into a steady dim; at low pack rates it flickers visibly.
+//! A working single-SM architecture would eliminate the handover dark
+//! gap entirely and remove the main flicker source.
 //!
-//! Take this file and collapse it to **single SM** while keeping the
-//! separate-programs model. That separates "dual SM required?" from
-//! "separate programs required?"
+//! ## What the echo investigation has narrowed the mechanism to
 //!
-//! Concretely:
+//! Taking the E21–E25 sweep in spwm_12 plus the rotation experiment
+//! in spwm_9 together, the picture is now quite specific:
 //!
-//! 1. **Keep spwm_14's two PIO programs**, install both into PIO0 at
-//!    different memory offsets (they're small — total ~21 instructions,
-//!    fit in 32-slot budget).
+//! - **spwm_9 rotation result:** moving the post-scan wrap from
+//!   `31→0` to `14→15` moved the echo with it. Echo appears on
+//!   *whichever scan_line fires just after the wrap*, carrying
+//!   *whichever scan_line fired just before*. Not tied to address 0.
+//! - **spwm_9 intensity scaling:** 48 intra-frame wraps produce a
+//!   clearly visible echo; 1 wrap is invisible. The echo is the
+//!   *integral of many dim leaks*, one per wrap event.
+//! - **E25 spatial pattern result:** echo is per-column, SRAM-address-
+//!   level, with sharp boundaries and no smearing. The chip is
+//!   writing scan_line N's data to scan_line N+1's SRAM in exact
+//!   1:1 column correspondence.
+//! - **E21 null:** nothing in the MCU-side PIO state (shift counters,
+//!   ISR, delay counter, stall state, status register) carries the
+//!   echo.
+//! - **E22 abandoned:** OSR / X / Y residue is structurally
+//!   impossible as an echo cause.
 //!
-//! 2. **Use only SM0**. Delete SM1 entirely. The `sm1`, `_sm1`, and
-//!    `SM1_*` references go away.
+//! Combined: the echo is a **chip-internal pipeline-continuity
+//! artefact**. The DP3364S's SPWM driver-load stage apparently
+//! cannot cleanly hand over between back-to-back scan_words unless
+//! it sees a "pipeline reset" event — some discontinuity in the CLK
+//! / LAT signalling that tells it "the previous scan_line is done,
+//! discard pipeline state". Dual-SM architectures (spwm_4 / 14)
+//! provide that reset implicitly via the SM handover on the shared
+//! CLK pin; spwm_12 never provides it.
 //!
-//! 3. **Swap programs at phase boundaries.** At end of data phase:
-//!    - wait_txstall(SM0_TXSTALL)
-//!    - disable_sm(SM0_EN)
-//!    - reconfigure SM0's SMx_EXECCTRL: WRAP_TOP / WRAP_BOTTOM to
-//!      point at scan program's bounds
-//!    - reconfigure SMx_PINCTRL: SIDE_SET_BASE/COUNT, SET_BASE/COUNT,
-//!      OUT_BASE/COUNT to match scan program's pin usage
-//!    - force SM0's PC to scan program start via SMx_INSTR (write
-//!      an unconditional JMP instruction to `s_wrap_target`)
-//!    - enable_sm(SM0_EN)
-//!    - run scan phase (ring-mode DMA, like spwm_14)
-//!    - reverse at next boundary.
+//! ## Implementation
 //!
-//! 4. **Watch out:**
-//!    - Side-set width differs: data PIO uses 2-bit side_set (CLK+LAT),
-//!      scan PIO uses 1-bit (CLK only). `SIDE_SET_COUNT` in PINCTRL
-//!      needs to be set accordingly per phase.
-//!    - Autopull threshold is 32 in both, so that's probably fine.
-//!    - Out-shift direction is Right in both.
-//!    - Side-set-opt (the bit that says "side-set is optional per
-//!      instruction") differs between spwm_4's data and scan PIOs.
-//!      Check `EXECCTRL.SIDE_EN` setting per phase.
-//!    - Register offsets to know:
-//!        SM0_EXECCTRL = PIO0_BASE + 0x0D0
-//!          bits 12:7  = WRAP_BOTTOM
-//!          bits 17:13 = WRAP_TOP
-//!          bit 30     = SIDE_EN (1 = side-set is optional per insn)
-//!          bit 29     = SIDE_PINDIR (0 = side-set writes to pins)
-//!        SM0_PINCTRL  = PIO0_BASE + 0x0DC
-//!          bits 4:0   = OUT_BASE
-//!          bits 9:5   = SET_BASE
-//!          bits 14:10 = SIDE_BASE
-//!          bits 19:15 = SET_COUNT
-//!          bits 25:20 = OUT_COUNT
-//!          bits 28:26 = SIDE_SET_COUNT
-//!        SM0_INSTR    = PIO0_BASE + 0x0D8 (write = force-execute insn)
+//! 1. Install both PIO programs (data + scan, verbatim from spwm_14)
+//!    into PIO0. `install()` returns their absolute memory offsets.
+//!    ~24 instructions total fits in the 32-slot budget.
 //!
-//! 5. **Expected outcomes:**
-//!    - No echo → dual-SM is NOT required; the key was separate programs.
-//!      We have a working single-SM path. Wrap up.
-//!    - Echo reappears → dual-SM itself is load-bearing for reasons
-//!      beyond PIO program structure (maybe PIO0 arbitration, maybe
-//!      per-SM state isolation). Decision point: port to dual-SM as
-//!      the working solution and call it done.
+//! 2. Build SM0 via `PIOBuilder::from_installed_program(data)`. This
+//!    sets SM0's EXECCTRL (WRAP_TOP/BOTTOM for data, SIDE_EN, etc.)
+//!    and PINCTRL (SIDE_SET_COUNT=2, OUT_BASE=0/COUNT=6, SIDE_BASE=11)
+//!    and clkdiv=2.
 //!
-//! ## Status
+//! 3. Build SM1 via `PIOBuilder::from_installed_program(scan)` as a
+//!    **configuration template only**: set it up, read its EXECCTRL
+//!    and PINCTRL, save them, then leave SM1 disabled forever.
 //!
-//! UNMODIFIED copy of spwm_14. Flashes and behaves exactly like spwm_14
-//! (dual-SM, no echo). Use as the refactor's starting baseline.
+//! 4. Set pindirs on SM0 for **all** panel-driving pins (0-13), since
+//!    after program swap those same pins will be output under scan's
+//!    OUT/SET/SIDESET mapping.
+//!
+//! 5. At each data→scan (or scan→data) phase boundary, while SM0 is
+//!    already stalled on autopull-from-empty-FIFO post-`wait_txstall`:
+//!    - Set clkdiv (2 for data, 3 for scan).
+//!    - Write the target program's EXECCTRL, PINCTRL to SM0's regs.
+//!    - Write a `JMP target_program_start` instruction to SM0_INSTR
+//!      (overrides the stalled instruction; SM executes the JMP next
+//!      cycle, PC ends up at the new program's entry point).
+//!    - SM then stalls on autopull again, waiting for the new DMA's
+//!      data. When that DMA kicks, the new program runs.
+//!
+//!    No `disable_sm`/`enable_sm` is needed — the override-while-
+//!    stalled path avoids any window where the SM could execute an
+//!    instruction with mismatched config. The CLK-idle during the
+//!    swap is incidental (a few PIO cycles of CPU register writes
+//!    while the SM holds its last side-set value), and whatever its
+//!    duration is, it's sufficient for the chip's pipeline reset.
+//!
+//! SM register-cluster layout (confirmed via rp235x-pac):
+//! ```text
+//!   SM0 cluster starts at PIO0_BASE + 0x0C8, each SM is 0x18 bytes.
+//!     +0x00 CLKDIV    (SM0 at 0x0C8)
+//!     +0x04 EXECCTRL  (SM0 at 0x0CC)
+//!     +0x08 SHIFTCTRL (SM0 at 0x0D0)
+//!     +0x0C ADDR      (SM0 at 0x0D4, read-only current PC)
+//!     +0x10 INSTR     (SM0 at 0x0D8, write = force-execute insn)
+//!     +0x14 PINCTRL   (SM0 at 0x0DC)
+//!
+//!   EXECCTRL bit fields:
+//!     bits 11:7  = WRAP_BOTTOM (wrap destination)
+//!     bits 16:12 = WRAP_TOP    (last insn before wrap)
+//!     bit 30     = SIDE_EN     (1 = side-set optional per insn)
+//!     bit 29     = SIDE_PINDIR (0 = side-set writes to pins)
+//!
+//!   PINCTRL bit fields:
+//!     bits 4:0   = OUT_BASE
+//!     bits 9:5   = SET_BASE
+//!     bits 14:10 = SIDE_BASE
+//!     bits 19:15 = SET_COUNT
+//!     bits 25:20 = OUT_COUNT
+//!     bits 28:26 = SIDE_SET_COUNT
+//! ```
+//!
+//! Program entry addresses are taken directly from `InstalledProgram::
+//! offset()` rather than extracted from EXECCTRL.WRAP_BOTTOM — they
+//! happen to coincide here (both programs' `wrap_target` labels sit
+//! at the top of their assembly), but `offset()` is the authoritative
+//! source and less fragile.
+//!
+//! JMP-always instruction encoding (16-bit PIO word):
+//! ```text
+//!   bits 15:13 = 000  (JMP)
+//!   bits 12:8  = 00000 (no delay/side-set)
+//!   bits 7:5   = 000  (condition: always)
+//!   bits 4:0   = address
+//! ```
+//! So `JMP always <addr>` = `addr & 0x1F`.
+//!
+//! ## Test pattern
+//!
+//! E25's four-block pattern (row 31 RED/BLUE, row 63 GREEN/YELLOW) so
+//! any residual echo is readable at a glance.
 //!
 //! ```sh
 //! cargo run --release --example spwm_15_single_sm_ported
@@ -344,21 +391,24 @@ fn update_wr_cfg(buf: &mut [u32; FRAME_WORDS], reg_idx: usize) {
 
 // ── Fill pixels helper ──────────────────────────────────────────────
 
-/// Echo-diagnostic pattern matching spwm_12's test: row 31 red
-/// (upper wrap source), row 63 green (lower wrap source). Any echo
-/// should appear on row 0 (red) / row 32 (green).
+/// E25 diagnostic pattern (matches spwm_12 and echo_baseline):
+///   row 31: cols 0-63 RED, cols 64-127 BLUE
+///   row 63: cols 0-63 GREEN, cols 64-127 YELLOW
+/// Any residual echo's spatial/colour structure is readable at a
+/// glance on rows 0 and 32.
 fn fill_pixels(_offset: u8) {
     let pixels = unsafe { &mut *core::ptr::addr_of_mut!(PIXELS) };
     for row in 0..64usize {
-        let c = if row == 31 {
-            Rgb::new(255, 0, 0)
-        } else if row == 63 {
-            Rgb::new(0, 255, 0)
-        } else {
-            Rgb::BLACK
-        };
         for col in 0..128usize {
-            pixels[row][col] = c;
+            pixels[row][col] = if row == 31 {
+                if col < 64 { Rgb::new(255, 0, 0) }
+                else        { Rgb::new(0, 0, 255) }
+            } else if row == 63 {
+                if col < 64 { Rgb::new(0, 255, 0) }
+                else        { Rgb::new(255, 255, 0) }
+            } else {
+                Rgb::BLACK
+            };
         }
     }
 }
@@ -436,34 +486,25 @@ fn core1_task() {
     }
 }
 
-// ── SM enable/disable + pindir handover ─────────────────────────────
+// ── PIO register access + program-swap helpers ──────────────────────
 
-const PIO0_BASE: u32 = 0x5020_0000;
-const PIO0_CTRL_SET: u32 = PIO0_BASE + 0x2000;
+// SM cluster layout (confirmed via rp235x-pac):
+//   0xC8 CLKDIV, 0xCC EXECCTRL, 0xD0 SHIFTCTRL, 0xD4 ADDR,
+//   0xD8 INSTR, 0xDC PINCTRL. Each SM cluster is 0x18 bytes;
+//   SM1 starts at 0xE0, etc.
+const PIO0_BASE: u32    = 0x5020_0000;
 const PIO0_CTRL_CLR: u32 = PIO0_BASE + 0x3000;
-const PIO0_FDEBUG: u32 = PIO0_BASE + 0x008;
-const SM0_PINCTRL: u32 = PIO0_BASE + 0x0DC;
-const SM1_PINCTRL: u32 = PIO0_BASE + 0x0F4;
-const SM0_INSTR: u32 = PIO0_BASE + 0x0D8;
-const SM1_INSTR: u32 = PIO0_BASE + 0x0F0;
-const SM0_EN: u32 = 1 << 0;
-const SM1_EN: u32 = 1 << 1;
-const SM0_TXSTALL: u32 = 1 << 24;
-const SM1_TXSTALL: u32 = 1 << 25;
+const PIO0_FDEBUG: u32  = PIO0_BASE + 0x008;
+const SM0_CLKDIV: u32   = PIO0_BASE + 0x0C8;
+const SM0_EXECCTRL: u32 = PIO0_BASE + 0x0CC;
+const SM0_INSTR: u32    = PIO0_BASE + 0x0D8;
+const SM0_PINCTRL: u32  = PIO0_BASE + 0x0DC;
+const SM1_EXECCTRL: u32 = PIO0_BASE + 0x0E4;
+const SM1_PINCTRL: u32  = PIO0_BASE + 0x0F4;
+const SM1_EN: u32       = 1 << 1;
+const SM0_TXSTALL: u32  = 1 << 24;
 
-const SET_PINDIRS_0: u32 = 0xE080;
-const SET_PINDIRS_1: u32 = 0xE081;
-const SET_PINDIRS_3: u32 = 0xE083;
-
-const PINCTRL_SET_COUNT_MASK: u32 = 0x7 << 26;
-const PINCTRL_SET_BASE_MASK: u32 = 0x1F << 5;
-
-fn enable_sm(mask: u32) {
-    unsafe { (PIO0_CTRL_SET as *mut u32).write_volatile(mask) };
-}
-fn disable_sm(mask: u32) {
-    unsafe { (PIO0_CTRL_CLR as *mut u32).write_volatile(mask) };
-}
+fn disable_sm(mask: u32) { unsafe { (PIO0_CTRL_CLR as *mut u32).write_volatile(mask) }; }
 
 fn wait_txstall(sm_stall_bit: u32) {
     unsafe {
@@ -474,29 +515,24 @@ fn wait_txstall(sm_stall_bit: u32) {
     }
 }
 
-fn force_set_pindirs(pinctrl_addr: u32, instr_addr: u32, base: u32, count: u32, instr: u32) {
-    unsafe {
-        let saved = (pinctrl_addr as *const u32).read_volatile();
-        let modified = (saved & !(PINCTRL_SET_COUNT_MASK | PINCTRL_SET_BASE_MASK))
-            | (count << 26) | (base << 5);
-        (pinctrl_addr as *mut u32).write_volatile(modified);
-        (instr_addr as *mut u32).write_volatile(instr);
-        (pinctrl_addr as *mut u32).write_volatile(saved);
-    }
+fn set_clkdiv(int_div: u32) {
+    unsafe { (SM0_CLKDIV as *mut u32).write_volatile(int_div << 16) };
 }
 
-// E20: handover functions stubbed out to test whether the pindir
-// transitions at phase boundaries are what suppresses the echo.
-// Both SMs keep pindirs=1 on their assigned pins throughout; only
-// disable_sm/enable_sm alternate execution.
-fn release_sm0_clk_lat() {}
-fn claim_sm0_clk_lat() {}
-fn release_sm1_clk() {}
-fn claim_sm1_clk() {}
-
-#[allow(dead_code)]
-fn _keep_force_set_pindirs_in_scope(a: u32, b: u32, c: u32, d: u32, e: u32) {
-    force_set_pindirs(a, b, c, d, e);
+/// Swap SM0's configuration to `execctrl`/`pinctrl` and force its PC
+/// to `program_start`. Must be called while SM0 is stalled on autopull
+/// (post-`wait_txstall`). Writes to SMx_INSTR during the stall override
+/// the stalled instruction; the SM executes the JMP next cycle, then
+/// stalls again at the new program's entry waiting for FIFO data.
+///
+/// JMP-always encoding: `0x0000 | (addr & 0x1F)` for address 0..31.
+fn swap_sm0_program(execctrl: u32, pinctrl: u32, program_start: u32) {
+    unsafe {
+        (SM0_EXECCTRL as *mut u32).write_volatile(execctrl);
+        (SM0_PINCTRL as *mut u32).write_volatile(pinctrl);
+        let jmp_always = program_start & 0x1F;
+        (SM0_INSTR as *mut u32).write_volatile(jmp_always);
+    }
 }
 
 // ── Entry point ──────────────────────────────────────────────────────
@@ -574,6 +610,7 @@ fn main() -> ! {
     da.bind(&mut d_wrap_source);
     let data_prog = da.assemble_with_wrap(d_wrap_source, d_wrap_target);
     let data_installed = pio0.install(&data_prog).unwrap();
+    let data_start = data_installed.offset() as u32;
 
     let (mut data_sm, _, data_tx) =
         hal::pio::PIOBuilder::from_installed_program(data_installed)
@@ -586,13 +623,23 @@ fn main() -> ! {
             .clock_divisor_fixed_point(2, 0)
             .build(sm0);
 
+    // SM0 drives all 14 panel pins across both programs, so set
+    // pindirs for the full set here.
     data_sm.set_pindirs([
         (0,  hal::pio::PinDir::Output), (1,  hal::pio::PinDir::Output),
         (2,  hal::pio::PinDir::Output), (3,  hal::pio::PinDir::Output),
         (4,  hal::pio::PinDir::Output), (5,  hal::pio::PinDir::Output),
-        (11, hal::pio::PinDir::Output), (12, hal::pio::PinDir::Output),
+        (6,  hal::pio::PinDir::Output), (7,  hal::pio::PinDir::Output),
+        (8,  hal::pio::PinDir::Output), (9,  hal::pio::PinDir::Output),
+        (10, hal::pio::PinDir::Output), (11, hal::pio::PinDir::Output),
+        (12, hal::pio::PinDir::Output), (13, hal::pio::PinDir::Output),
     ]);
     let _data_sm = data_sm.start();
+
+    // Read data's EXECCTRL and PINCTRL values for later swap-back.
+    // `data_start` was captured above from the InstalledProgram.
+    let data_execctrl = unsafe { (SM0_EXECCTRL as *const u32).read_volatile() };
+    let data_pinctrl  = unsafe { (SM0_PINCTRL  as *const u32).read_volatile() };
 
     // ── SM1: scan path ───────────────────────────────────────────────
     let scan_ss = pio::SideSet::new(false, 1, false);
@@ -644,8 +691,15 @@ fn main() -> ! {
     sa.bind(&mut s_wrap_source);
     let scan_prog = sa.assemble_with_wrap(s_wrap_source, s_wrap_target);
     let scan_installed = pio0.install(&scan_prog).unwrap();
+    let scan_start = scan_installed.offset() as u32;
 
-    let (mut scan_sm, _, scan_tx) =
+    // Build SM1 with the scan program **as a configuration template
+    // only**. The builder writes SM1's EXECCTRL and PINCTRL with the
+    // scan-appropriate values (clkdiv 3, side_set width 1, OUT 6/5,
+    // SET 13/1, wrap bounds pointing at scan's installed offset).
+    // We read those registers back and then disable SM1 forever; only
+    // SM0 actually runs code, swapping config at phase boundaries.
+    let (_scan_sm_template, _, _scan_tx_unused) =
         hal::pio::PIOBuilder::from_installed_program(scan_installed)
             .buffers(hal::pio::Buffers::OnlyTx)
             .out_pins(6, 5)
@@ -657,30 +711,33 @@ fn main() -> ! {
             .clock_divisor_fixed_point(3, 0)
             .build(sm1);
 
-    scan_sm.set_pindirs([
-        (6,  hal::pio::PinDir::Output), (7,  hal::pio::PinDir::Output),
-        (8,  hal::pio::PinDir::Output), (9,  hal::pio::PinDir::Output),
-        (10, hal::pio::PinDir::Output), (11, hal::pio::PinDir::Output),
-        (13, hal::pio::PinDir::Output),
-    ]);
-    let _scan_sm = scan_sm.start();
-    disable_sm(SM1_EN);
+    // Snapshot scan's register values before SM1 is ever enabled.
+    let scan_execctrl = unsafe { (SM1_EXECCTRL as *const u32).read_volatile() };
+    let scan_pinctrl  = unsafe { (SM1_PINCTRL  as *const u32).read_volatile() };
+    disable_sm(SM1_EN); // belt-and-braces; SM1 was never started.
 
-    // ── 5. DMA — ch0 feeds SM0, ch1 feeds SM1 ────────────────────────
+    defmt::info!(
+        "data: start={=u32} execctrl={=u32:08x} pinctrl={=u32:08x}",
+        data_start, data_execctrl, data_pinctrl,
+    );
+    defmt::info!(
+        "scan: start={=u32} execctrl={=u32:08x} pinctrl={=u32:08x}",
+        scan_start, scan_execctrl, scan_pinctrl,
+    );
+
+    // ── 5. DMA — single channel ch0, feeds SM0's FIFO (shared
+    //       between data and scan phases) ───────────────────────────
     let dma = pac.DMA.split(&mut pac.RESETS);
-    let mut data_ch = dma.ch0;
-    let mut scan_ch = dma.ch1;
-    let mut data_tx = data_tx;
-    let mut scan_tx = scan_tx;
+    let mut ch = dma.ch0;
+    let _ch1_reserved = dma.ch1; // reserve so HAL doesn't hand it out
+    let mut tx = data_tx;
 
-    defmt::info!("DP3364S S-PWM (dual-core, double-buffered) starting");
+    defmt::info!("spwm_15 (single-SM, program-swap) starting");
 
     // ── 6. Init frame headers + initial pixel fill ───────────────────
     init_frame_headers(unsafe { &mut *core::ptr::addr_of_mut!(FRAME_BUF_A) });
     init_frame_headers(unsafe { &mut *core::ptr::addr_of_mut!(FRAME_BUF_B) });
 
-    // Initial fill into buffer A (PIXELS is all-black from static init,
-    // but we fill with offset 0 for consistency with the main loop).
     fill_pixels(0);
     pack_pixels(unsafe { &mut *core::ptr::addr_of_mut!(FRAME_BUF_A) });
 
@@ -691,7 +748,24 @@ fn main() -> ! {
     let cores = mc.cores();
     cores[1].spawn(unsafe { CORE1_STACK.take().unwrap() }, core1_task).unwrap();
 
-    // ── 8. Startup flush using buffer A ──────────────────────────────
+    // Phase-transition helpers, captured over the runtime values.
+    // Both close over `scan_start` / `data_start` extracted above.
+    //
+    // Called while SM0 is stalled on autopull (post-wait_txstall). The
+    // config swap and the force-JMP happen while the SM is quiescent;
+    // the SM re-stalls at the new program's entry point awaiting FIFO.
+    let swap_to_scan = || {
+        set_clkdiv(3);
+        swap_sm0_program(scan_execctrl, scan_pinctrl, scan_start);
+    };
+    let swap_to_data = || {
+        set_clkdiv(2);
+        swap_sm0_program(data_execctrl, data_pinctrl, data_start);
+    };
+
+    // ── 8. Startup flush using buffer A. One iteration per config
+    //       register so 13 WR_CFG values are written to SRAM, plus a
+    //       tail of extra all-zero DATA_LATCH flushes. ──────────────
     for flush in 0..14u32 {
         if (flush as usize) < CONFIG_REGS.len() {
             update_wr_cfg(
@@ -699,113 +773,94 @@ fn main() -> ! {
                 flush as usize,
             );
         }
+        // Data phase: SM0 already configured for data from build.
         let buf = unsafe { &*core::ptr::addr_of!(FRAME_BUF_A) };
-        let cfg = single_buffer::Config::new(data_ch, buf, data_tx);
+        let cfg = single_buffer::Config::new(ch, buf, tx);
         let xfer = cfg.start();
-        let (ch, _, new_tx) = xfer.wait();
-        data_ch = ch;
-        data_tx = new_tx;
+        let (new_ch, _, new_tx) = xfer.wait();
+        ch = new_ch;
+        tx = new_tx;
         wait_txstall(SM0_TXSTALL);
 
-        release_sm0_clk_lat();
-        disable_sm(SM0_EN);
-        claim_sm1_clk();
+        // Program swap → scan.
+        swap_to_scan();
         let scan = unsafe { &*core::ptr::addr_of!(SCAN_BUF) };
-        let scan_cfg = single_buffer::Config::new(scan_ch, scan, scan_tx);
+        let scan_cfg = single_buffer::Config::new(ch, scan, tx);
         let scan_xfer = scan_cfg.start();
-        enable_sm(SM1_EN);
-        let (ch, _, new_tx) = scan_xfer.wait();
-        scan_ch = ch;
-        scan_tx = new_tx;
-        wait_txstall(SM1_TXSTALL);
-        release_sm1_clk();
-        disable_sm(SM1_EN);
-        claim_sm0_clk_lat();
-        enable_sm(SM0_EN);
+        let (new_ch, _, new_tx) = scan_xfer.wait();
+        ch = new_ch;
+        tx = new_tx;
+        wait_txstall(SM0_TXSTALL);
+
+        // Program swap → data (for next iteration, and to leave SM0
+        // in data config when the flush loop exits).
+        swap_to_data();
     }
     defmt::info!("flush complete");
 
-    // ── 9. Main loop — dual-core double-buffered ─────────────────────
-    //
-    // Core 0 DMAs the active buffer while core 1 packs the inactive
-    // buffer. After both finish, swap. No tearing, no dark gaps from
-    // packing.
-    let mut active_buf: u8 = 0; // 0 = A is display buffer, 1 = B
+    // ── 9. Main loop — single-SM, program-swap at each phase ────────
+    let mut active_buf: u8 = 0;
     let mut offset: u8 = 0;
 
-    // Kick off core 1 with the first pack job
     offset = offset.wrapping_add(2);
     let mut core1_buf: u8 = 1 - active_buf;
     fifo_write(offset as u32 | ((core1_buf as u32) << 8));
     let mut core1_done = false;
 
-    // Do the initial data load (SM0 already enabled)
+    // Initial data load — SM0 is in data config.
     {
         let buf = if active_buf == 0 {
             unsafe { &*core::ptr::addr_of!(FRAME_BUF_A) }
         } else {
             unsafe { &*core::ptr::addr_of!(FRAME_BUF_B) }
         };
-        let data_cfg = single_buffer::Config::new(data_ch, buf, data_tx);
-        let data_xfer = data_cfg.start();
-        let (ch, _, new_tx) = data_xfer.wait();
-        data_ch = ch;
-        data_tx = new_tx;
+        let cfg = single_buffer::Config::new(ch, buf, tx);
+        let xfer = cfg.start();
+        let (new_ch, _, new_tx) = xfer.wait();
+        ch = new_ch;
+        tx = new_tx;
         wait_txstall(SM0_TXSTALL);
     }
 
-    // Handover to scan — SM1 stays active from here
-    release_sm0_clk_lat();
-    disable_sm(SM0_EN);
-    claim_sm1_clk();
-    enable_sm(SM1_EN);
+    // Transition to scan — SM0 stays in scan config between scan
+    // passes until a new data load is needed.
+    swap_to_scan();
 
     loop {
-        // ── Scan one full pass (32 rows) ─────────────────────────
+        // One scan pass (32 scan_words).
         let scan = unsafe { &*core::ptr::addr_of!(SCAN_BUF) };
-        let scan_cfg = single_buffer::Config::new(scan_ch, scan, scan_tx);
+        let scan_cfg = single_buffer::Config::new(ch, scan, tx);
         let scan_xfer = scan_cfg.start();
-        let (ch, _, new_tx) = scan_xfer.wait();
-        scan_ch = ch;
-        scan_tx = new_tx;
-        wait_txstall(SM1_TXSTALL);
+        let (new_ch, _, new_tx) = scan_xfer.wait();
+        ch = new_ch;
+        tx = new_tx;
+        wait_txstall(SM0_TXSTALL);
 
-        // ── Check if core 1 finished packing ─────────────────────
         if !core1_done {
             if fifo_try_read().is_some() {
                 core1_done = true;
             }
         }
 
-        // ── If new frame ready, briefly load it then resume scan ─
         if core1_done {
-            // Handover to SM0 for data load
-            release_sm1_clk();
-            disable_sm(SM1_EN);
-            claim_sm0_clk_lat();
-            enable_sm(SM0_EN);
+            // Swap to data, load next frame, swap back to scan.
+            swap_to_data();
 
-            // Swap and DMA new data
             active_buf = core1_buf;
             let buf = if active_buf == 0 {
                 unsafe { &*core::ptr::addr_of!(FRAME_BUF_A) }
             } else {
                 unsafe { &*core::ptr::addr_of!(FRAME_BUF_B) }
             };
-            let data_cfg = single_buffer::Config::new(data_ch, buf, data_tx);
-            let data_xfer = data_cfg.start();
-            let (ch, _, new_tx) = data_xfer.wait();
-            data_ch = ch;
-            data_tx = new_tx;
+            let cfg = single_buffer::Config::new(ch, buf, tx);
+            let xfer = cfg.start();
+            let (new_ch, _, new_tx) = xfer.wait();
+            ch = new_ch;
+            tx = new_tx;
             wait_txstall(SM0_TXSTALL);
 
-            // Handover back to scan
-            release_sm0_clk_lat();
-            disable_sm(SM0_EN);
-            claim_sm1_clk();
-            enable_sm(SM1_EN);
+            swap_to_scan();
 
-            // Kick off next pack job on core 1
             offset = offset.wrapping_add(2);
             core1_buf = 1 - active_buf;
             fifo_write(offset as u32 | ((core1_buf as u32) << 8));
