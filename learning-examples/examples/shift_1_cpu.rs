@@ -128,8 +128,8 @@ fn main() -> ! {
         let (color, name) = colors[color_idx % colors.len()];
         defmt::info!("Color: {}", name);
 
-        // Show each color for ~300 frames.
-        for _frame in 0..1500 {
+        // Show each color for ~2 seconds (~640 µs/frame × 3000 ≈ 2 s).
+        for _frame in 0..3000 {
             // Scan all 32 row pairs once per frame.
             for row in 0..ROW_PAIRS as u32 {
                 // ── a) Clock in pixel data ────────────────────────

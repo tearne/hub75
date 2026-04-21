@@ -1,142 +1,79 @@
-//! # DP3364S S-PWM — Step 8: padded-continuous single DMA
+//! # DP3364S S-PWM — Step 11: post-scan cycles sweep (E17)
 //!
-//! Eighth in the SPWM progression. Builds on `spwm_5_unified_sm.rs`.
+//! Eleventh in the SPWM progression. Unrotated spwm_8 architecture
+//! with `POST_SCAN_CYCLES` as the swept variable. Purpose: quantify
+//! echo-intensity vs. wraps-per-frame cleanly, without any rotation
+//! confounds.
 //!
-//! One continuous DMA per frame, double-buffered, no ring/data phase
-//! split. The frame buffer is padded with ~50 scan cycles at the end
-//! so each DMA iteration takes ~16.7 ms. Every row sees a uniform
-//! ~3 kHz pulse cadence, not the bursty pattern of spwm_5's split.
+//! > **Hypothesis.** Echo intensity is (approximately) linear in
+//! > wraps-per-frame. spwm_9 established the two endpoints:
+//! >   -  1 wrap/frame → invisible
+//! >   - 48 wraps/frame → clearly visible
+//! > Goal here: find where the visibility threshold sits between
+//! > those two endpoints, and see how much flicker budget we'd have
+//! > left at that operating point.
 //!
-//! ```text
-//!   VSYNC | PRE_ACT | WR_CFG
-//!   [ DATA_LATCH × 16 ] × 32                (512 data latches)
-//!   [ SCAN_WORD × 32  ] × POST_SCAN_CYCLES  (padding + refresh)
-//! ```
+//! ## Protocol (manual sweep)
+//!
+//! 1. Edit `POST_SCAN_CYCLES` to the next value in the sweep list.
+//! 2. `cargo run --release --example spwm_11_cycles_sweep`
+//! 3. Cold-cycle panel power, observe echo intensity on rows 0
+//!    (upper, cyan) and 32 (lower, yellow) vs. the bright source
+//!    rows 31 / 63.
+//! 4. Also rate flicker on the bright rows. Low cycle counts → high
+//!    per-row refresh interval → visible flicker.
+//! 5. Record both values, then move to the next cycle count.
+//!
+//! Suggested sweep order (bisection-ish):
+//!   - 50 (baseline — matches spwm_8, expect visible echo)
+//!   - 12 (¼ of baseline, ~1.7 kHz per-row refresh)
+//!   - 6  (borderline flicker, ~1.1 kHz per-row refresh)
+//!   - 3  (likely flicker visible, ~600 Hz per-row refresh)
+//!   - 1  (one wrap per frame — confirm invisible from spwm_9 E15)
+//!   - intermediate values (e.g. 25, 18, 8) if needed to narrow the
+//!     echo-threshold knee.
+//!
+//! ## Frame-rate / refresh-rate table (approximate)
+//!
+//! At DCLK 16.7 MHz, ~4 ms data phase + POST_SCAN_CYCLES × 32 × 132
+//! DCLKs post-scan:
+//!
+//! | cycles | post-scan | frame | FPS  | per-row refresh |
+//! |--------|-----------|-------|------|-----------------|
+//! |   50   | 12.7 ms   | 16.7ms|  60  | 3000 Hz         |
+//! |   25   |  6.3 ms   | 10.3ms|  97  | 2425 Hz         |
+//! |   12   |  3.0 ms   |  7.0ms| 142  | 1704 Hz         |
+//! |    6   |  1.5 ms   |  5.5ms| 181  | 1086 Hz         |
+//! |    3   |  0.8 ms   |  4.8ms| 210  |  630 Hz         |
+//! |    1   |  0.3 ms   |  4.3ms| 235  |  235 Hz         |
+//!
+//! Per-row refresh below ~800 Hz tends to show flicker on bright
+//! content. So the "feasible" sweep window (flicker acceptable) is
+//! roughly cycles ≥ 6.
+//!
+//! ## Test pattern
+//!
+//! Unrotated architecture → every wrap is 31 → 0 (cycle boundary)
+//! and the frame boundary is also 31 → 0. So the echo appears on
+//! scan_line 0. Colour row 31 cyan / row 63 yellow; echo is cyan on
+//! row 0 / yellow on row 32.
 //!
 //! ```sh
-//! cargo run --release --example spwm_8_padded_continuous
+//! cargo run --release --example spwm_11_cycles_sweep
 //! ```
 //!
-//! Sync bootstraps via spwm_5's W12-OE-on-scan_line-0 pattern during
-//! a short startup ring-mode phase, then the main padded-continuous
-//! loop takes over with uniform W4 OE.
+//! ## What we're looking for
 //!
-//! ## Status
-//!
-//! - **4-row DATA shift** — FIXED. Root cause: `reg 0x0C[7] = 1`
-//!   (SYNC_MODE = "High Gray Indep Refresh Sync", expected the
-//!   chip to generate ROW internally) was incompatible with our
-//!   padded-DMA architecture. Now using `0x0C08` (Mode 0, "Frame
-//!   Sync"). Bit 6 is a don't-care in Mode 0.
-//! - **scan_line 31 → scan_line 0 data echo** — OPEN. A dim
-//!   echo of scan_line 31's data appears on scan_line 0 at every
-//!   post-scan cycle wrap (row 0 in upper half, row 32 in lower).
-//!   Paused investigation 2026-04-20; not yet mitigated. Visible
-//!   only against black / on high-contrast test patterns — on
-//!   normal image content expected to be near-invisible.
-//!
-//! ## Register reference (DP3264S V2.0 datasheet, §11.9)
-//!
-//! Source: cognigraph.com/6502/datasheet-DP3264S-google-translate.pdf
-//!
-//! | Reg  | Field              | Bits | Our val     | Description                       |
-//! |------|--------------------|------|-------------|-----------------------------------|
-//! | 0x02 | LINE_SET           | 5:0  | 0x1F (=31)  | scan_lines − 1                    |
-//! | 0x02 | OPDET_EN_A1        | 7    | 0           | open-circuit detection chain      |
-//! | 0x03 | GROUP_SET          | 6:0  | 0x7F        | refresh-rate group count          |
-//! | 0x03 | OPDET_EN_A2        | 7    | 0           | open-circuit detection chain      |
-//! | 0x04 | PWM_WIDTH          | 6:0  | 0x3F        | PWM width (4*(PWM_WIDTH+1))       |
-//! | 0x05 | DISSHD_TIME_2      | 3:0  | 0x4         | row pre-charge time, def 4        |
-//! | 0x05 | DISSHD_TIME_1      | 7:4  | 0x3         | row line-clear time, def 3        |
-//! | 0x06 | PLL_DIV            | 2:0  | 2           | GCLK = DCLK × (PLL_DIV+1)         |
-//! | 0x06 | DECOUP_RAT         | 7:3  | 8           | coupling optimisation coefficient |
-//! | 0x07 | Gamma_FINE         | 2:0  | 0           | gamma fine level                  |
-//! | 0x07 | Gamma_FINE_EN      | 3    | 0           | gamma fine enable                 |
-//! | 0x07 | Gamma_COARSE       | 6:4  | 0           | gamma coarse level                |
-//! | 0x07 | Gamma_COARSE_EN    | 7    | 0           | gamma coarse enable               |
-//! | 0x08 | IGAIN              | 7:0  | 0xBF        | current gain                      |
-//! | 0x09 | DECOUP_1           | 4:0  | 0           | coupling optimisation fine        |
-//! | 0x0A | LG_ENHANCE         | 0    | 0           | low-gray display enhancement      |
-//! | 0x0A | PIT_OPT            | 2:1  | 3           | low-gray spot optimisation        |
-//! | 0x0A | DECOUP_EN          | 3    | 1 (on)      | coupling optimisation switch      |
-//! | 0x0A | DISSHD_EN          | 4    | 1 (on)      | shadow-elimination switch         |
-//! | 0x0A | DECOUP_ENHANCE     | 7:6  | 2           | coupling enhance (0 strongest)    |
-//! | 0x0B | (unmapped)         | 7:0  | 0x8B        | not in datasheet pages we read    |
-//! | 0x0C | OPT_EN             | 0    | 0           | open-circuit detection            |
-//! | 0x0C | RM_OP              | 1    | 0           | bad-pixel removal                 |
-//! | 0x0C | LP_MODE            | 5:4  | 0           | power-saving mode                 |
-//! | 0x0C | SYNC_MODE          | 7:6  | 0b00        | 0/1=Frame; 2=HGSync; 3=HGAsync    |
-//! | 0x0D | DECOUP_LEVEL       | 4:0  | 18          | coupling optimisation level       |
-//! | 0x11 | OPEN_EN_B          | 7    | 0           | open-circuit detection chain      |
-//!
-//! Row display timing (§11.7.6):
-//!   `DCLKs_per_line = (2*(DISSHD_TIME_1+1) + 2*(DISSHD_TIME_2+1)`
-//!                   ` + 4*(PWM_WIDTH+1)) / (PLL_DIV+1) + line_break`
-//!
-//! ## Experiment log
-//!
-//! Findings to preserve so we don't rerun dead paths. Legend: ✓=fix,
-//! ∅=null, ✗=broke something, ?=confounded.
-//!
-//! ```text
-//!   D1  ∅ WR_CFG payload rotation vs constant → 4-row shift unchanged
-//!   D3  ✓ reg 0x0C bit 7 clear → 4-row shift resolved
-//!   D4  ∅ POST_SCAN_CYCLES ∈ {1, 17, 25, 33, 50} → shift invariant
-//!   E1  ? Reverse post-scan order → broke VSYNC ptr reset
-//!   E2  ? Double each scan_line → SRAM mapping corrupted
-//!   E3  ✗ Warmup scan_word with oe-count=0 → blanks chip
-//!   E4  ∅ SETUP_CLK=32 on scan_word_0 only → echo unchanged
-//!         (rules out settling-time as echo mechanism)
-//!   E6  ∅ DISSHD_TIME_1 0 → 3 → 15 → echo unchanged
-//!   E7  ∅ DECOUP_1 0 → 31 → echo unchanged
-//!   E9  ∅ DECOUP_ENHANCE 2 → 0 → echo unchanged
-//!   E10 ∅ DECOUP_LEVEL 18 → 31 → echo unchanged
-//!   E13 ? PRE_ACT breather (5 words) per post-scan cycle — caused
-//!         a +1 write-pointer shift; couldn't isolate echo effect.
-//!         Confirms mid-frame PRE_ACT has side effects on chip state.
-//!   E14a ∅ DISPLAY_CLK 100 → 128 global → no change.
-//!   E14b ∅ DISPLAY_CLK 100 → 128 on scan_word_0 only → no change.
-//!   E14c ∅ clkdiv 3 → 4 (global main-loop slowdown) → no change.
-//!         None of "scan slower" helped — echo is not rate-sensitive.
-//!
-//!   Cross-check (2026-04-20): **spwm_4 does NOT exhibit the echo**
-//!   under the same test pattern. spwm_4's split data/scan phase
-//!   architecture has a natural ~ms gap (DMA reconfigure + VSYNC)
-//!   between scan pass and next frame. So the echo is specific to
-//!   padded-continuous layouts with tight back-to-back 31→0 wraps.
-//!   Suggests the fix is "break the continuous stream" somehow —
-//!   but E13 showed PRE_ACT mid-frame has confounding side effects.
-//! ```
-//!
-//! Also ruled out pre-D experiments (VSYNC position A1–A5, VSYNC LAT
-//! width B1–B3, DMD_STM32's LAT-12 "enable all output" per frame).
-//! `LAT=2` isn't a no-op either — it halts display.
-//!
-//! ## Experiments still open if we return to this
-//!
-//! - E8: reg 0x0A[0] LG_ENHANCE ON (currently OFF).
-//! - E11: reg 0x0B bit sweep (unmapped; current 0x8B).
-//! - E12: reg 0x06[2:0] PLL_DIV sweep — does echo scale with
-//!   internal clock rate?
-//! - Pack-time workaround: ensure scan_line 0's first DATA_LATCH
-//!   cycle carries harmless data that matches scan_line 31, so the
-//!   echo becomes indistinguishable from the real row.
-//! - Re-examine the datasheet — specifically §11.6 mode descriptions
-//!   — for hints about row-to-row pipeline behaviour at wraps.
-//!
-//! ## Protocol
-//!
-//! The Pico auto-runs whatever program is in flash on power-up. To
-//! test spwm_8 in isolation, it must be the *last-flashed* program
-//! before a power cycle:
-//!
-//! 1. Edit the knob under test.
-//! 2. `cargo run --release --example spwm_8_padded_continuous`.
-//! 3. Pull both panel and Pico power, restore.
-//! 4. Observe.
-//! 5. If the panel gets stuck, recover via
-//!    `cargo run --release --example spwm_5_unified_sm` + cold boot
-//!    — then re-flash spwm_8 before the next test.
+//! - **Echo visibility vs. cycles.** If linear, echo intensity halves
+//!   from 50 → 25 → 12 → 6 → 3 → 1. Expect the knee somewhere near
+//!   3-6 cycles.
+//! - **Flicker visibility vs. cycles.** Subjective, but at 6-cycle
+//!   point (per-row refresh ~1.1 kHz) it should be on the edge.
+//! - **Overlap window.** If echo is invisible at ≥N cycles AND
+//!   flicker is invisible at ≤M cycles with N ≤ M, we have a
+//!   flicker-and-echo-free operating point without any architectural
+//!   change. If there's no overlap, E19 (multi-DMA, clean-gap
+//!   architecture) is required.
 
 #![no_std]
 #![no_main]
@@ -209,10 +146,14 @@ const LATCHES_PER_FRAME: usize = SCAN_LINES * LATCHES_PER_LINE;       // 512
 const DATA_OFFSET: usize = HEADER_WORDS;                              // 40
 const DATA_END:    usize = DATA_OFFSET + LATCHES_PER_FRAME * DATA_LATCH_STRIDE; // 16 936
 
-// Padding scans fill the rest of the ~16.7 ms frame period. 50 cycles
-// × 32 rows × 132 CLKs at DCLK 16.7 MHz ≈ 12.65 ms, plus the ~4 ms
-// data phase ≈ 16.65 ms total.
+// E17 sweep variable. Each cycle = 32 scan_words × 132 DCLKs per
+// scan_word = 4224 DCLKs. At 16.7 MHz → ~253 µs per cycle.
+// Wraps-per-frame = POST_SCAN_CYCLES (every cycle boundary is a
+// 31 → 0 wrap in the unrotated architecture).
+//
+// Sweep order: 50 (baseline) → 12 → 6 → 3 → 1, plus intermediates.
 const POST_SCAN_CYCLES: usize = 50;
+
 const SCAN_OFFSET: usize = DATA_END;
 const POST_SCAN_WORDS: usize = POST_SCAN_CYCLES * SCAN_LINES;
 
@@ -362,8 +303,8 @@ fn init_frame_headers(buf: &mut [u32; FRAME_WORDS]) {
     }
 
     for cycle in 0..POST_SCAN_CYCLES {
-        for scan_line in 0..SCAN_LINES {
-            buf[post_scan_offset(cycle, scan_line)] = scan_word_for(scan_line);
+        for slot in 0..SCAN_LINES {
+            buf[post_scan_offset(cycle, slot)] = scan_word_for(slot);
         }
     }
 }
@@ -437,15 +378,21 @@ fn update_wr_cfg(buf: &mut [u32; FRAME_WORDS], reg_idx: usize) {
 
 // ── Fill pixels helper ──────────────────────────────────────────────
 
-/// Echo-diagnostic pattern: all black except row 31 bright green and
-/// row 63 bright red. Isolates the scan_line-31 → scan_line-0 leak.
+/// Echo-diagnostic pattern for E17. Unrotated architecture →
+/// every wrap is 31 → 0 → echo lands on row 0 / 32. All black
+/// except the bright source rows:
+///   - row 31 cyan    (upper wrap source)
+///   - row 63 yellow  (lower wrap source)
+///
+/// Rate the echo on row 0 (cyan) and row 32 (yellow) for the current
+/// POST_SCAN_CYCLES setting.
 fn fill_pixels(_offset: u8) {
     let pixels = unsafe { &mut *core::ptr::addr_of_mut!(PIXELS) };
     for row in 0..64usize {
         let c = if row == 31 {
-            Rgb::new(0, 255, 0)
+            Rgb::new(0, 255, 255)     // upper wrap source — cyan
         } else if row == 63 {
-            Rgb::new(255, 0, 0)
+            Rgb::new(255, 255, 0)     // lower wrap source — yellow
         } else {
             Rgb::BLACK
         };

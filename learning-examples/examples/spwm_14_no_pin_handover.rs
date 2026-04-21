@@ -262,32 +262,33 @@ fn update_wr_cfg(buf: &mut [u32; FRAME_WORDS], reg_idx: usize) {
 
 // ── Fill pixels helper ──────────────────────────────────────────────
 
-fn fill_pixels(offset: u8) {
-    // Diagonal rainbow: hue = (row + col + offset) mod 256.
-    let pixels = unsafe { &mut *core::ptr::addr_of_mut!(PIXELS) };
-    for row in 0..64usize {
-        for col in 0..128usize {
-            let hue = (row as u16 + col as u16 + offset as u16) as u8;
-            pixels[row][col] = hsv(hue);
-        }
-    }
-}
-
-/// Echo-diagnostic pattern: all black except row 31 bright green and
-/// row 63 bright red. Swap in by renaming to `fill_pixels`.
-#[allow(dead_code)]
-fn fill_pixels_echo_probe(_offset: u8) {
+/// Echo-diagnostic pattern matching spwm_12's test: row 31 red
+/// (upper wrap source), row 63 green (lower wrap source). Any echo
+/// should appear on row 0 (red) / row 32 (green).
+fn fill_pixels(_offset: u8) {
     let pixels = unsafe { &mut *core::ptr::addr_of_mut!(PIXELS) };
     for row in 0..64usize {
         let c = if row == 31 {
-            Rgb::new(0, 255, 0)
-        } else if row == 63 {
             Rgb::new(255, 0, 0)
+        } else if row == 63 {
+            Rgb::new(0, 255, 0)
         } else {
             Rgb::BLACK
         };
         for col in 0..128usize {
             pixels[row][col] = c;
+        }
+    }
+}
+
+/// Diagonal rainbow: `hue = (row + col + offset) mod 256`.
+#[allow(dead_code)]
+fn fill_pixels_rainbow(offset: u8) {
+    let pixels = unsafe { &mut *core::ptr::addr_of_mut!(PIXELS) };
+    for row in 0..64usize {
+        for col in 0..128usize {
+            let hue = (row as u16 + col as u16 + offset as u16) as u8;
+            pixels[row][col] = hsv(hue);
         }
     }
 }
@@ -402,17 +403,18 @@ fn force_set_pindirs(pinctrl_addr: u32, instr_addr: u32, base: u32, count: u32, 
     }
 }
 
-fn release_sm0_clk_lat() {
-    force_set_pindirs(SM0_PINCTRL, SM0_INSTR, 11, 2, SET_PINDIRS_0);
-}
-fn claim_sm0_clk_lat() {
-    force_set_pindirs(SM0_PINCTRL, SM0_INSTR, 11, 2, SET_PINDIRS_3);
-}
-fn release_sm1_clk() {
-    force_set_pindirs(SM1_PINCTRL, SM1_INSTR, 11, 1, SET_PINDIRS_0);
-}
-fn claim_sm1_clk() {
-    force_set_pindirs(SM1_PINCTRL, SM1_INSTR, 11, 1, SET_PINDIRS_1);
+// E20: handover functions stubbed out to test whether the pindir
+// transitions at phase boundaries are what suppresses the echo.
+// Both SMs keep pindirs=1 on their assigned pins throughout; only
+// disable_sm/enable_sm alternate execution.
+fn release_sm0_clk_lat() {}
+fn claim_sm0_clk_lat() {}
+fn release_sm1_clk() {}
+fn claim_sm1_clk() {}
+
+#[allow(dead_code)]
+fn _keep_force_set_pindirs_in_scope(a: u32, b: u32, c: u32, d: u32, e: u32) {
+    force_set_pindirs(a, b, c, d, e);
 }
 
 // ── Entry point ──────────────────────────────────────────────────────

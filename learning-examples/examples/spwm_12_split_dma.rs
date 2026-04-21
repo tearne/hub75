@@ -1,142 +1,55 @@
-//! # DP3364S S-PWM — Step 8: padded-continuous single DMA
+//! # DP3364S S-PWM — Step 12: split DMA (E19)
 //!
-//! Eighth in the SPWM progression. Builds on `spwm_5_unified_sm.rs`.
-//!
-//! One continuous DMA per frame, double-buffered, no ring/data phase
-//! split. The frame buffer is padded with ~50 scan cycles at the end
-//! so each DMA iteration takes ~16.7 ms. Every row sees a uniform
-//! ~3 kHz pulse cadence, not the bursty pattern of spwm_5's split.
+//! Twelfth in the SPWM progression. Copied from spwm_11 (unrotated
+//! post-scan, `POST_SCAN_CYCLES = 50`) and modified to emit each frame
+//! as **two DMAs** with a `wait_txstall` between them:
 //!
 //! ```text
-//!   VSYNC | PRE_ACT | WR_CFG
-//!   [ DATA_LATCH × 16 ] × 32                (512 data latches)
-//!   [ SCAN_WORD × 32  ] × POST_SCAN_CYCLES  (padding + refresh)
+//!   DMA 1: [VSYNC | PRE_ACT | WR_CFG | DATA_LATCH × 512]   (DATA_END words)
+//!   wait_txstall                                           ← clean pipeline gap
+//!   DMA 2: [SCAN_WORD × 32 × POST_SCAN_CYCLES]             (post-scan region)
+//!   wait_txstall
 //! ```
+//!
+//! ## Motivation
+//!
+//! E17 (cycles sweep in spwm_11) produced a surprising null: echo
+//! intensity did not scale with wraps-per-frame from 50 → 3 cycles.
+//! That rules out the "accumulation over many intra-post-scan 31 → 0
+//! boundaries" theory. The echo is more plausibly **one strong event
+//! per frame**, most likely at the DATA_LATCH (last = scan_line 31)
+//! → post-scan (first = scan_line 0) adjacency — the only 31 → 0
+//! transition that happens deterministically once per frame,
+//! regardless of cycle count.
+//!
+//! spwm_4 has no echo. Its architecture naturally separates the
+//! DATA_LATCH and post-scan phases with a DMA-reconfigure gap; that
+//! gap is our best guess for why spwm_4 is clean. E19 reproduces
+//! exactly that gap inside spwm_11's otherwise-unchanged architecture.
+//!
+//! ## Prediction
+//!
+//! Inserting a `wait_txstall` between the data and post-scan DMAs
+//! should break the DATA → SCAN adjacency. The pipeline drains, the
+//! chip's internal state settles, and no data leaks onto scan_line 0.
+//!
+//! - **Echo gone** (rows 0 / 32 fully black): hypothesis confirmed;
+//!   this is our architectural fix. FPS impact from ~2× DMA dispatch
+//!   overhead is negligible (~µs on ~16.7 ms frames).
+//! - **Echo still visible**: the mechanism is not at the DATA → SCAN
+//!   boundary. Most likely next step is E21 (pack-time compensation)
+//!   as a deterministic workaround since the echo landing spot is
+//!   known and fixed.
+//!
+//! ## Test pattern
+//!
+//! Unchanged from spwm_11 — row 31 cyan, row 63 yellow. Echo (if any)
+//! appears on row 0 / 32. `POST_SCAN_CYCLES` stays at 50 so per-row
+//! refresh is the flicker-free 3 kHz.
 //!
 //! ```sh
-//! cargo run --release --example spwm_8_padded_continuous
+//! cargo run --release --example spwm_12_split_dma
 //! ```
-//!
-//! Sync bootstraps via spwm_5's W12-OE-on-scan_line-0 pattern during
-//! a short startup ring-mode phase, then the main padded-continuous
-//! loop takes over with uniform W4 OE.
-//!
-//! ## Status
-//!
-//! - **4-row DATA shift** — FIXED. Root cause: `reg 0x0C[7] = 1`
-//!   (SYNC_MODE = "High Gray Indep Refresh Sync", expected the
-//!   chip to generate ROW internally) was incompatible with our
-//!   padded-DMA architecture. Now using `0x0C08` (Mode 0, "Frame
-//!   Sync"). Bit 6 is a don't-care in Mode 0.
-//! - **scan_line 31 → scan_line 0 data echo** — OPEN. A dim
-//!   echo of scan_line 31's data appears on scan_line 0 at every
-//!   post-scan cycle wrap (row 0 in upper half, row 32 in lower).
-//!   Paused investigation 2026-04-20; not yet mitigated. Visible
-//!   only against black / on high-contrast test patterns — on
-//!   normal image content expected to be near-invisible.
-//!
-//! ## Register reference (DP3264S V2.0 datasheet, §11.9)
-//!
-//! Source: cognigraph.com/6502/datasheet-DP3264S-google-translate.pdf
-//!
-//! | Reg  | Field              | Bits | Our val     | Description                       |
-//! |------|--------------------|------|-------------|-----------------------------------|
-//! | 0x02 | LINE_SET           | 5:0  | 0x1F (=31)  | scan_lines − 1                    |
-//! | 0x02 | OPDET_EN_A1        | 7    | 0           | open-circuit detection chain      |
-//! | 0x03 | GROUP_SET          | 6:0  | 0x7F        | refresh-rate group count          |
-//! | 0x03 | OPDET_EN_A2        | 7    | 0           | open-circuit detection chain      |
-//! | 0x04 | PWM_WIDTH          | 6:0  | 0x3F        | PWM width (4*(PWM_WIDTH+1))       |
-//! | 0x05 | DISSHD_TIME_2      | 3:0  | 0x4         | row pre-charge time, def 4        |
-//! | 0x05 | DISSHD_TIME_1      | 7:4  | 0x3         | row line-clear time, def 3        |
-//! | 0x06 | PLL_DIV            | 2:0  | 2           | GCLK = DCLK × (PLL_DIV+1)         |
-//! | 0x06 | DECOUP_RAT         | 7:3  | 8           | coupling optimisation coefficient |
-//! | 0x07 | Gamma_FINE         | 2:0  | 0           | gamma fine level                  |
-//! | 0x07 | Gamma_FINE_EN      | 3    | 0           | gamma fine enable                 |
-//! | 0x07 | Gamma_COARSE       | 6:4  | 0           | gamma coarse level                |
-//! | 0x07 | Gamma_COARSE_EN    | 7    | 0           | gamma coarse enable               |
-//! | 0x08 | IGAIN              | 7:0  | 0xBF        | current gain                      |
-//! | 0x09 | DECOUP_1           | 4:0  | 0           | coupling optimisation fine        |
-//! | 0x0A | LG_ENHANCE         | 0    | 0           | low-gray display enhancement      |
-//! | 0x0A | PIT_OPT            | 2:1  | 3           | low-gray spot optimisation        |
-//! | 0x0A | DECOUP_EN          | 3    | 1 (on)      | coupling optimisation switch      |
-//! | 0x0A | DISSHD_EN          | 4    | 1 (on)      | shadow-elimination switch         |
-//! | 0x0A | DECOUP_ENHANCE     | 7:6  | 2           | coupling enhance (0 strongest)    |
-//! | 0x0B | (unmapped)         | 7:0  | 0x8B        | not in datasheet pages we read    |
-//! | 0x0C | OPT_EN             | 0    | 0           | open-circuit detection            |
-//! | 0x0C | RM_OP              | 1    | 0           | bad-pixel removal                 |
-//! | 0x0C | LP_MODE            | 5:4  | 0           | power-saving mode                 |
-//! | 0x0C | SYNC_MODE          | 7:6  | 0b00        | 0/1=Frame; 2=HGSync; 3=HGAsync    |
-//! | 0x0D | DECOUP_LEVEL       | 4:0  | 18          | coupling optimisation level       |
-//! | 0x11 | OPEN_EN_B          | 7    | 0           | open-circuit detection chain      |
-//!
-//! Row display timing (§11.7.6):
-//!   `DCLKs_per_line = (2*(DISSHD_TIME_1+1) + 2*(DISSHD_TIME_2+1)`
-//!                   ` + 4*(PWM_WIDTH+1)) / (PLL_DIV+1) + line_break`
-//!
-//! ## Experiment log
-//!
-//! Findings to preserve so we don't rerun dead paths. Legend: ✓=fix,
-//! ∅=null, ✗=broke something, ?=confounded.
-//!
-//! ```text
-//!   D1  ∅ WR_CFG payload rotation vs constant → 4-row shift unchanged
-//!   D3  ✓ reg 0x0C bit 7 clear → 4-row shift resolved
-//!   D4  ∅ POST_SCAN_CYCLES ∈ {1, 17, 25, 33, 50} → shift invariant
-//!   E1  ? Reverse post-scan order → broke VSYNC ptr reset
-//!   E2  ? Double each scan_line → SRAM mapping corrupted
-//!   E3  ✗ Warmup scan_word with oe-count=0 → blanks chip
-//!   E4  ∅ SETUP_CLK=32 on scan_word_0 only → echo unchanged
-//!         (rules out settling-time as echo mechanism)
-//!   E6  ∅ DISSHD_TIME_1 0 → 3 → 15 → echo unchanged
-//!   E7  ∅ DECOUP_1 0 → 31 → echo unchanged
-//!   E9  ∅ DECOUP_ENHANCE 2 → 0 → echo unchanged
-//!   E10 ∅ DECOUP_LEVEL 18 → 31 → echo unchanged
-//!   E13 ? PRE_ACT breather (5 words) per post-scan cycle — caused
-//!         a +1 write-pointer shift; couldn't isolate echo effect.
-//!         Confirms mid-frame PRE_ACT has side effects on chip state.
-//!   E14a ∅ DISPLAY_CLK 100 → 128 global → no change.
-//!   E14b ∅ DISPLAY_CLK 100 → 128 on scan_word_0 only → no change.
-//!   E14c ∅ clkdiv 3 → 4 (global main-loop slowdown) → no change.
-//!         None of "scan slower" helped — echo is not rate-sensitive.
-//!
-//!   Cross-check (2026-04-20): **spwm_4 does NOT exhibit the echo**
-//!   under the same test pattern. spwm_4's split data/scan phase
-//!   architecture has a natural ~ms gap (DMA reconfigure + VSYNC)
-//!   between scan pass and next frame. So the echo is specific to
-//!   padded-continuous layouts with tight back-to-back 31→0 wraps.
-//!   Suggests the fix is "break the continuous stream" somehow —
-//!   but E13 showed PRE_ACT mid-frame has confounding side effects.
-//! ```
-//!
-//! Also ruled out pre-D experiments (VSYNC position A1–A5, VSYNC LAT
-//! width B1–B3, DMD_STM32's LAT-12 "enable all output" per frame).
-//! `LAT=2` isn't a no-op either — it halts display.
-//!
-//! ## Experiments still open if we return to this
-//!
-//! - E8: reg 0x0A[0] LG_ENHANCE ON (currently OFF).
-//! - E11: reg 0x0B bit sweep (unmapped; current 0x8B).
-//! - E12: reg 0x06[2:0] PLL_DIV sweep — does echo scale with
-//!   internal clock rate?
-//! - Pack-time workaround: ensure scan_line 0's first DATA_LATCH
-//!   cycle carries harmless data that matches scan_line 31, so the
-//!   echo becomes indistinguishable from the real row.
-//! - Re-examine the datasheet — specifically §11.6 mode descriptions
-//!   — for hints about row-to-row pipeline behaviour at wraps.
-//!
-//! ## Protocol
-//!
-//! The Pico auto-runs whatever program is in flash on power-up. To
-//! test spwm_8 in isolation, it must be the *last-flashed* program
-//! before a power cycle:
-//!
-//! 1. Edit the knob under test.
-//! 2. `cargo run --release --example spwm_8_padded_continuous`.
-//! 3. Pull both panel and Pico power, restore.
-//! 4. Observe.
-//! 5. If the panel gets stuck, recover via
-//!    `cargo run --release --example spwm_5_unified_sm` + cold boot
-//!    — then re-flash spwm_8 before the next test.
 
 #![no_std]
 #![no_main]
@@ -171,8 +84,8 @@ const SCAN_LINES: usize = 32;
 // guarantees every subsequent DATA_LATCH addresses the full 128-wide
 // SRAM correctly.
 const CONFIG_REGS: [u16; 13] = [
-    0x037F, 0x1100, 0x021F, 0x043F, 0x0534, 0x0642, 0x0700,
-    0x08BF, 0x0960, 0x0ABE, 0x0B8B, 0x0C08, 0x0D12,
+    0x037F, 0x1100, 0x021F, 0x043F, 0x0504, 0x0642, 0x0700,
+    0x08BF, 0x0960, 0x0ABE, 0x0B8B, 0x0C88, 0x0D12,
 ];
 
 // ── Per-command CLK counts ───────────────────────────────────────────
@@ -209,10 +122,14 @@ const LATCHES_PER_FRAME: usize = SCAN_LINES * LATCHES_PER_LINE;       // 512
 const DATA_OFFSET: usize = HEADER_WORDS;                              // 40
 const DATA_END:    usize = DATA_OFFSET + LATCHES_PER_FRAME * DATA_LATCH_STRIDE; // 16 936
 
-// Padding scans fill the rest of the ~16.7 ms frame period. 50 cycles
-// × 32 rows × 132 CLKs at DCLK 16.7 MHz ≈ 12.65 ms, plus the ~4 ms
-// data phase ≈ 16.65 ms total.
+// E17 sweep variable. Each cycle = 32 scan_words × 132 DCLKs per
+// scan_word = 4224 DCLKs. At 16.7 MHz → ~253 µs per cycle.
+// Wraps-per-frame = POST_SCAN_CYCLES (every cycle boundary is a
+// 31 → 0 wrap in the unrotated architecture).
+//
+// Sweep order: 50 (baseline) → 12 → 6 → 3 → 1, plus intermediates.
 const POST_SCAN_CYCLES: usize = 50;
+
 const SCAN_OFFSET: usize = DATA_END;
 const POST_SCAN_WORDS: usize = POST_SCAN_CYCLES * SCAN_LINES;
 
@@ -230,6 +147,29 @@ static mut SCAN_BUF: ScanBufAligned = ScanBufAligned([0u32; SCAN_LINES]);
 
 // ── Core 1 stack ─────────────────────────────────────────────────────
 static mut CORE1_STACK: hal::multicore::Stack<4096> = hal::multicore::Stack::new();
+
+// Extra idle gap between DMA 1 and DMA 2. Tested up to 100_000 cycles
+// (~670 µs) → no effect on the echo, so pipeline-drain isn't the cure.
+// Left here at 0 as documentation.
+const INTER_DMA_DELAY_CYCLES: u32 = 0;
+
+// VSYNC-injection experiment: after DMA 1 (data) finishes, manually
+// push a VSYNC header + payload word into the PIO TX FIFO before
+// starting DMA 2 (post-scan). If VSYNC is the pipeline-reset signal
+// that spwm_4 implicitly benefits from, a mid-frame extra VSYNC
+// should kill the echo on scan_line 0.
+//   0 = no injection
+//   1 = inject VSYNC
+//   2 = inject VSYNC + PRE_ACT (like spwm_4's per-frame header)
+const INTER_DMA_INJECT: u32 = 0;
+
+// Pin high-Z experiment: mimic what spwm_4 actually does (state-
+// machine handover releases CLK/LAT to input between phases). Here
+// we force SM0 to set pindirs=0 on CLK (pin 11) and LAT (pin 12)
+// between DMA 1 and DMA 2, optionally delay, then reclaim them.
+//   0 = disabled
+//   N = release, delay N cortex-m cycles (~6.67 ns each), reclaim
+const INTER_DMA_HIGHZ_CYCLES: u32 = 0;
 
 // ── Scan parameters ──────────────────────────────────────────────────
 const DISPLAY_CLK: u32 = 100;
@@ -361,9 +301,17 @@ fn init_frame_headers(buf: &mut [u32; FRAME_WORDS]) {
         }
     }
 
+    // Emit W12 on the first scan_line of EVERY cycle (mimicking
+    // spwm_4's ring-mode scan buffer which has W12 at scan_line 0 and
+    // wraps every 32 scans, giving the chip a W12 per group rather
+    // than once per frame). Datasheet §11.5 only prescribes Group 0
+    // Line 0, but spwm_4 (echo-free) emits it every group, so test
+    // the same.
     for cycle in 0..POST_SCAN_CYCLES {
-        for scan_line in 0..SCAN_LINES {
-            buf[post_scan_offset(cycle, scan_line)] = scan_word_for(scan_line);
+        for slot in 0..SCAN_LINES {
+            let oe = if slot == 0 { OE_CLK_W12 } else { OE_CLK_W4 };
+            buf[post_scan_offset(cycle, slot)] =
+                scan_word(DISPLAY_CLK, slot as u32, SETUP_CLK, oe);
         }
     }
 }
@@ -437,15 +385,21 @@ fn update_wr_cfg(buf: &mut [u32; FRAME_WORDS], reg_idx: usize) {
 
 // ── Fill pixels helper ──────────────────────────────────────────────
 
-/// Echo-diagnostic pattern: all black except row 31 bright green and
-/// row 63 bright red. Isolates the scan_line-31 → scan_line-0 leak.
+/// Echo-diagnostic pattern for E17. Unrotated architecture →
+/// every wrap is 31 → 0 → echo lands on row 0 / 32. All black
+/// except the bright source rows:
+///   - row 31 cyan    (upper wrap source)
+///   - row 63 yellow  (lower wrap source)
+///
+/// Rate the echo on row 0 (cyan) and row 32 (yellow) for the current
+/// POST_SCAN_CYCLES setting.
 fn fill_pixels(_offset: u8) {
     let pixels = unsafe { &mut *core::ptr::addr_of_mut!(PIXELS) };
     for row in 0..64usize {
         let c = if row == 31 {
-            Rgb::new(0, 255, 0)
+            Rgb::new(255, 0, 0)       // upper wrap source — red
         } else if row == 63 {
-            Rgb::new(255, 0, 0)
+            Rgb::new(0, 255, 0)       // lower wrap source — green
         } else {
             Rgb::BLACK
         };
@@ -528,9 +482,31 @@ fn core1_task() {
 // ── PIO helpers ─────────────────────────────────────────────────────
 
 const PIO0_BASE: u32 = 0x5020_0000;
+const PIO0_CTRL_SET: u32 = PIO0_BASE + 0x2000;
+const PIO0_CTRL_CLR: u32 = PIO0_BASE + 0x3000;
 const PIO0_FDEBUG: u32 = PIO0_BASE + 0x008;
 const SM0_CLKDIV: u32 = PIO0_BASE + 0x0C8;
+const SM0_INSTR: u32 = PIO0_BASE + 0x0D8;
+const SM0_PINCTRL: u32 = PIO0_BASE + 0x0DC;
+const SM0_EN: u32 = 1 << 0;
 const SM0_TXSTALL: u32 = 1 << 24;
+
+fn enable_sm(mask: u32) {
+    unsafe { (PIO0_CTRL_SET as *mut u32).write_volatile(mask) };
+}
+fn disable_sm(mask: u32) {
+    unsafe { (PIO0_CTRL_CLR as *mut u32).write_volatile(mask) };
+}
+
+// PIO SET instruction encodings (for force_set_pindirs).
+//   E080 = SET pindirs, 0   (all released SET pins → input)
+//   E083 = SET pindirs, 3   (2 lowest SET pins → output)
+const SET_PINDIRS_0: u32 = 0xE080;
+const SET_PINDIRS_3: u32 = 0xE083;
+
+// PINCTRL bit-fields (SET base/count) we temporarily hijack.
+const PINCTRL_SET_COUNT_MASK: u32 = 0x7 << 26;
+const PINCTRL_SET_BASE_MASK: u32 = 0x1F << 5;
 
 fn set_clkdiv(int_div: u32) {
     unsafe { (SM0_CLKDIV as *mut u32).write_volatile(int_div << 16) };
@@ -542,6 +518,20 @@ fn wait_txstall(sm_stall_bit: u32) {
         while (PIO0_FDEBUG as *const u32).read_volatile() & sm_stall_bit == 0 {
             cortex_m::asm::nop();
         }
+    }
+}
+
+/// Briefly reassign SM0's SET base/count to the given pins, force-
+/// execute one PIO instruction, then restore PINCTRL. Ported from
+/// spwm_4 — safe to call while SM0 is stalled on a TX wait.
+fn force_set_pindirs(base: u32, count: u32, instr: u32) {
+    unsafe {
+        let saved = (SM0_PINCTRL as *const u32).read_volatile();
+        let modified = (saved & !(PINCTRL_SET_COUNT_MASK | PINCTRL_SET_BASE_MASK))
+            | (count << 26) | (base << 5);
+        (SM0_PINCTRL as *mut u32).write_volatile(modified);
+        (SM0_INSTR as *mut u32).write_volatile(instr);
+        (SM0_PINCTRL as *mut u32).write_volatile(saved);
     }
 }
 
@@ -882,21 +872,81 @@ fn main() -> ! {
     offset = offset.wrapping_add(2);
     fifo_write(offset as u32 | ((core1_buf as u32) << 8));
 
-    // Continuous DMA loop. Each iteration sends header + interleaved
-    // body + post-scan padding (~16.7 ms). When core 1 signals a new
-    // frame is ready, swap the active buffer on the next iteration.
+    // Split-DMA loop (E19). Each frame goes out as two DMAs with a
+    // wait_txstall between:
+    //   DMA 1: header + DATA_LATCHes   [0 .. DATA_END]
+    //   gap   (pipeline reset)
+    //   DMA 2: post-scan scan words    [SCAN_OFFSET .. FRAME_WORDS]
     loop {
-        let buf = if active_buf == 0 {
-            unsafe { &*core::ptr::addr_of!(FRAME_BUF_A) }
+        let buf_ptr = if active_buf == 0 {
+            core::ptr::addr_of!(FRAME_BUF_A) as *const u32
         } else {
-            unsafe { &*core::ptr::addr_of!(FRAME_BUF_B) }
+            core::ptr::addr_of!(FRAME_BUF_B) as *const u32
         };
-        let cfg = single_buffer::Config::new(ch, buf, tx);
+
+        // DMA 1: header + DATA_LATCHes. Match spwm_4's data-phase
+        // clkdiv of 2 (75 MHz PIO, ~37.5 MHz DCLK).
+        set_clkdiv(2);
+        enable_sm(SM0_EN);
+        let data_slice = unsafe { core::slice::from_raw_parts(buf_ptr, DATA_END) };
+        let cfg = single_buffer::Config::new(ch, data_slice, tx);
         let xfer = cfg.start();
         let (new_ch, _, new_tx) = xfer.wait();
         ch = new_ch;
         tx = new_tx;
         wait_txstall(SM0_TXSTALL);
+        disable_sm(SM0_EN);
+
+        if INTER_DMA_DELAY_CYCLES > 0 {
+            cortex_m::asm::delay(INTER_DMA_DELAY_CYCLES);
+        }
+
+        if INTER_DMA_HIGHZ_CYCLES > 0 {
+            // Release CLK/LAT (pins 11-12) → high-Z, delay, reclaim.
+            force_set_pindirs(11, 2, SET_PINDIRS_0);
+            cortex_m::asm::delay(INTER_DMA_HIGHZ_CYCLES);
+            force_set_pindirs(11, 2, SET_PINDIRS_3);
+        }
+
+        if INTER_DMA_INJECT >= 1 {
+            // Push VSYNC (2 words) directly to PIO TX FIFO. After the
+            // wait_txstall above, FIFO is empty; `OnlyTx` mode gives
+            // 8-word depth, so up to 7 words fit without overrun.
+            unsafe {
+                let txf = PIO0_TXF0 as *mut u32;
+                txf.write_volatile(data_header(VSYNC_PRE, VSYNC_LAT));
+                txf.write_volatile(0);
+                if INTER_DMA_INJECT >= 2 {
+                    // + PRE_ACT (1 header + 4 payload = 5 words).
+                    txf.write_volatile(data_header(PRE_ACT_PRE, PRE_ACT_LAT));
+                    for _ in 0..PRE_ACT_WORDS {
+                        txf.write_volatile(0);
+                    }
+                }
+            }
+            wait_txstall(SM0_TXSTALL);
+        }
+
+        // DMA 2: post-scan region, emitted as POST_SCAN_CYCLES back-
+        // to-back 32-word DMAs (mimicking spwm_14's per-group DMA
+        // pattern which has a small CPU gap between every group).
+        set_clkdiv(3);
+        enable_sm(SM0_EN);
+        for cycle in 0..POST_SCAN_CYCLES {
+            let scan_slice = unsafe {
+                core::slice::from_raw_parts(
+                    buf_ptr.add(SCAN_OFFSET + cycle * SCAN_LINES),
+                    SCAN_LINES,
+                )
+            };
+            let cfg = single_buffer::Config::new(ch, scan_slice, tx);
+            let xfer = cfg.start();
+            let (new_ch, _, new_tx) = xfer.wait();
+            ch = new_ch;
+            tx = new_tx;
+            wait_txstall(SM0_TXSTALL);
+        }
+        disable_sm(SM0_EN);
 
         if fifo_try_read().is_some() {
             frame_count += 1;

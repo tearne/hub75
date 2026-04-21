@@ -1,38 +1,120 @@
-//! # DP3364S S-PWM — Step 4: Dual-Core Packing
+//! # DP3364S S-PWM — Step 15: single-SM port of spwm_4 (STUB)
 //!
-//! Fourth in the SPWM progression. Builds on `spwm_3_dual_pio.rs`.
+//! Fifteenth in the SPWM progression. **STARTING POINT** for resuming
+//! the echo investigation. This file is currently an unmodified copy
+//! of `spwm_14_no_pin_handover` (which is spwm_4 with the four pindir
+//! handover functions stubbed out). Left unmodified so it flashes and
+//! runs as a dual-SM no-echo baseline — refactor to single-SM starts
+//! here.
 //!
-//! **What this step adds:** core 1 handles `fill_pixels` + `pack_pixels`
-//! while core 0 drives the display via PIO+DMA. Double-buffered frame
-//! data ensures no tearing.
+//! ## The question this file needs to answer
 //!
-//! **Architecture:** core 0 scans continuously from chip SRAM, only
-//! pausing briefly (~2.6ms) to DMA new frame data when core 1 signals
-//! a freshly packed buffer is ready. Brightness is constant regardless
-//! of how long packing takes — scan duty cycle is decoupled from pack
-//! performance.
+//! Is a genuinely single-SM architecture capable of driving this chip
+//! **without the scan_line 31 → scan_line 0 echo**, or does two SMs
+//! matter structurally for reasons we don't yet understand?
 //!
-//! ```text
-//!   Core 0: scan loop (SM1) ──→ core 1 done? ──→ pause, DMA new
-//!           ↑                     no → keep scanning    data (SM0),
-//!           └──────────────────────────────────────── resume scan
+//! ## The investigation so far (2026-04-20)
 //!
-//!   Core 1: wait for signal → fill pixels → pack → signal done
-//! ```
+//! **Echo symptom:** in spwm_12's single-SM continuous-DMA architecture
+//! with unified-dispatch PIO, scan_line 31's data leaks onto scan_line
+//! 0 at display time. Slot-31 → slot-0 SRAM-level leak, deterministic,
+//! and specific to spwm_12's architecture.
 //!
-//! Communication via SIO FIFO (hardware mailbox between cores).
+//! **Baseline established:** spwm_4 / spwm_13 (dual-SM with separate
+//! data and scan PIO programs) shows **no echo** on the same panel
+//! with the same test pattern (row 31 red, row 63 green). So the echo
+//! is a property of our single-SM approach, not the chip or panel.
 //!
-//! **Remaining limitation:** each data load requires a ~2.6ms dark gap
-//! for the SM0↔SM1 handover (shared CLK pin). At high pack rates this
-//! is imperceptible (frequent short gaps = steady dim). At low pack
-//! rates (<60 FPS) individual gaps become visible as flicker. Eliminating
-//! this would require a single-SM architecture that interleaves data
-//! loading with scan — no handover, no dark gap.
+//! **Variables isolated between spwm_12 (echo) and spwm_14 (no echo):**
 //!
-//! ## Run
+//! | Variable                                    | Tested? | Matters? |
+//! |---------------------------------------------|---------|----------|
+//! | Command-stream adjacency / wrap count       | yes     | no       |
+//! | Gap duration between data and scan          | yes     | no       |
+//! | Injected VSYNC / PRE_ACT between phases     | yes     | no       |
+//! | Pin high-Z release on CLK/LAT between phases| yes     | no       |
+//! | W12 on Group 0 Line 0 only vs every group   | yes     | no       |
+//! | SYNC_MODE register (0x0C08 → 0x0C88)        | yes     | no       |
+//! | DISSHD_TIME_1 (0x0534 → 0x0504, matches sp4)| yes     | no       |
+//! | GROUP_SET (0x037F → 0x0331)                 | yes     | no       |
+//! | Clkdiv switching (2 for data, 3 for scan)   | yes     | no       |
+//! | SM disable/enable between DMAs              | yes     | no       |
+//! | Per-group 32-word scan DMAs vs 1-big-DMA    | yes     | no       |
+//! | Pindir handover between dual SMs (E20)      | yes     | no       |
+//!
+//! **Still genuinely different:**
+//! - spwm_14 uses two separate, SM-specific PIO programs (data-only
+//!   on SM0, scan-only on SM1). spwm_12 uses a unified PIO program
+//!   with a type-bit dispatch mechanism.
+//! - spwm_14 uses two DMA channels. spwm_12 uses one.
+//!
+//! ## Plan for tomorrow
+//!
+//! Take this file and collapse it to **single SM** while keeping the
+//! separate-programs model. That separates "dual SM required?" from
+//! "separate programs required?"
+//!
+//! Concretely:
+//!
+//! 1. **Keep spwm_14's two PIO programs**, install both into PIO0 at
+//!    different memory offsets (they're small — total ~21 instructions,
+//!    fit in 32-slot budget).
+//!
+//! 2. **Use only SM0**. Delete SM1 entirely. The `sm1`, `_sm1`, and
+//!    `SM1_*` references go away.
+//!
+//! 3. **Swap programs at phase boundaries.** At end of data phase:
+//!    - wait_txstall(SM0_TXSTALL)
+//!    - disable_sm(SM0_EN)
+//!    - reconfigure SM0's SMx_EXECCTRL: WRAP_TOP / WRAP_BOTTOM to
+//!      point at scan program's bounds
+//!    - reconfigure SMx_PINCTRL: SIDE_SET_BASE/COUNT, SET_BASE/COUNT,
+//!      OUT_BASE/COUNT to match scan program's pin usage
+//!    - force SM0's PC to scan program start via SMx_INSTR (write
+//!      an unconditional JMP instruction to `s_wrap_target`)
+//!    - enable_sm(SM0_EN)
+//!    - run scan phase (ring-mode DMA, like spwm_14)
+//!    - reverse at next boundary.
+//!
+//! 4. **Watch out:**
+//!    - Side-set width differs: data PIO uses 2-bit side_set (CLK+LAT),
+//!      scan PIO uses 1-bit (CLK only). `SIDE_SET_COUNT` in PINCTRL
+//!      needs to be set accordingly per phase.
+//!    - Autopull threshold is 32 in both, so that's probably fine.
+//!    - Out-shift direction is Right in both.
+//!    - Side-set-opt (the bit that says "side-set is optional per
+//!      instruction") differs between spwm_4's data and scan PIOs.
+//!      Check `EXECCTRL.SIDE_EN` setting per phase.
+//!    - Register offsets to know:
+//!        SM0_EXECCTRL = PIO0_BASE + 0x0D0
+//!          bits 12:7  = WRAP_BOTTOM
+//!          bits 17:13 = WRAP_TOP
+//!          bit 30     = SIDE_EN (1 = side-set is optional per insn)
+//!          bit 29     = SIDE_PINDIR (0 = side-set writes to pins)
+//!        SM0_PINCTRL  = PIO0_BASE + 0x0DC
+//!          bits 4:0   = OUT_BASE
+//!          bits 9:5   = SET_BASE
+//!          bits 14:10 = SIDE_BASE
+//!          bits 19:15 = SET_COUNT
+//!          bits 25:20 = OUT_COUNT
+//!          bits 28:26 = SIDE_SET_COUNT
+//!        SM0_INSTR    = PIO0_BASE + 0x0D8 (write = force-execute insn)
+//!
+//! 5. **Expected outcomes:**
+//!    - No echo → dual-SM is NOT required; the key was separate programs.
+//!      We have a working single-SM path. Wrap up.
+//!    - Echo reappears → dual-SM itself is load-bearing for reasons
+//!      beyond PIO program structure (maybe PIO0 arbitration, maybe
+//!      per-SM state isolation). Decision point: port to dual-SM as
+//!      the working solution and call it done.
+//!
+//! ## Status
+//!
+//! UNMODIFIED copy of spwm_14. Flashes and behaves exactly like spwm_14
+//! (dual-SM, no echo). Use as the refactor's starting baseline.
 //!
 //! ```sh
-//! cargo run --release --example spwm_4_dual_core
+//! cargo run --release --example spwm_15_single_sm_ported
 //! ```
 
 #![no_std]
@@ -262,32 +344,33 @@ fn update_wr_cfg(buf: &mut [u32; FRAME_WORDS], reg_idx: usize) {
 
 // ── Fill pixels helper ──────────────────────────────────────────────
 
-fn fill_pixels(offset: u8) {
-    // Diagonal rainbow: hue = (row + col + offset) mod 256.
-    let pixels = unsafe { &mut *core::ptr::addr_of_mut!(PIXELS) };
-    for row in 0..64usize {
-        for col in 0..128usize {
-            let hue = (row as u16 + col as u16 + offset as u16) as u8;
-            pixels[row][col] = hsv(hue);
-        }
-    }
-}
-
-/// Echo-diagnostic pattern: all black except row 31 bright green and
-/// row 63 bright red. Swap in by renaming to `fill_pixels`.
-#[allow(dead_code)]
-fn fill_pixels_echo_probe(_offset: u8) {
+/// Echo-diagnostic pattern matching spwm_12's test: row 31 red
+/// (upper wrap source), row 63 green (lower wrap source). Any echo
+/// should appear on row 0 (red) / row 32 (green).
+fn fill_pixels(_offset: u8) {
     let pixels = unsafe { &mut *core::ptr::addr_of_mut!(PIXELS) };
     for row in 0..64usize {
         let c = if row == 31 {
-            Rgb::new(0, 255, 0)
-        } else if row == 63 {
             Rgb::new(255, 0, 0)
+        } else if row == 63 {
+            Rgb::new(0, 255, 0)
         } else {
             Rgb::BLACK
         };
         for col in 0..128usize {
             pixels[row][col] = c;
+        }
+    }
+}
+
+/// Diagonal rainbow: `hue = (row + col + offset) mod 256`.
+#[allow(dead_code)]
+fn fill_pixels_rainbow(offset: u8) {
+    let pixels = unsafe { &mut *core::ptr::addr_of_mut!(PIXELS) };
+    for row in 0..64usize {
+        for col in 0..128usize {
+            let hue = (row as u16 + col as u16 + offset as u16) as u8;
+            pixels[row][col] = hsv(hue);
         }
     }
 }
@@ -402,17 +485,18 @@ fn force_set_pindirs(pinctrl_addr: u32, instr_addr: u32, base: u32, count: u32, 
     }
 }
 
-fn release_sm0_clk_lat() {
-    force_set_pindirs(SM0_PINCTRL, SM0_INSTR, 11, 2, SET_PINDIRS_0);
-}
-fn claim_sm0_clk_lat() {
-    force_set_pindirs(SM0_PINCTRL, SM0_INSTR, 11, 2, SET_PINDIRS_3);
-}
-fn release_sm1_clk() {
-    force_set_pindirs(SM1_PINCTRL, SM1_INSTR, 11, 1, SET_PINDIRS_0);
-}
-fn claim_sm1_clk() {
-    force_set_pindirs(SM1_PINCTRL, SM1_INSTR, 11, 1, SET_PINDIRS_1);
+// E20: handover functions stubbed out to test whether the pindir
+// transitions at phase boundaries are what suppresses the echo.
+// Both SMs keep pindirs=1 on their assigned pins throughout; only
+// disable_sm/enable_sm alternate execution.
+fn release_sm0_clk_lat() {}
+fn claim_sm0_clk_lat() {}
+fn release_sm1_clk() {}
+fn claim_sm1_clk() {}
+
+#[allow(dead_code)]
+fn _keep_force_set_pindirs_in_scope(a: u32, b: u32, c: u32, d: u32, e: u32) {
+    force_set_pindirs(a, b, c, d, e);
 }
 
 // ── Entry point ──────────────────────────────────────────────────────
