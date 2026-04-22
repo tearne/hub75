@@ -3,9 +3,9 @@
 //! Placeholder example whose sole purpose is to hold the current plan
 //! as doc comments. No code; running it does nothing.
 //!
-//! Last updated: 2026-04-22 (POST_SCAN_CYCLES sweep complete; file
-//! renamed 16→18 so it sits after the working baseline
-//! `spwm_17_combined`).
+//! Last updated: 2026-04-22 (POST_SCAN_CYCLES sweep + clkdiv
+//! experiment complete; file renamed 16→18 so it sits after the
+//! working baseline `spwm_17_combined`).
 //!
 //! ## Where we are
 //!
@@ -78,19 +78,39 @@
 //!     you don't need.
 //!   - **Operating default fixed at `POST_SCAN_CYCLES = 50`.** The
 //!     only remaining lever for more brightness is shrinking the
-//!     data phase itself — task (1) below.
+//!     data phase itself — see the clkdiv experiment below, which
+//!     closed that door.
 //!
-//! ### 1. PIO data clkdiv=1 experiment (risky)
+//! ### ~~1. PIO data clkdiv=1 experiment~~ — DONE 2026-04-22
 //!
-//! Halve the data-phase dark gap by doubling PIO data-path clock
-//! (75 → 150 MHz → DCLK 37.5 → 75 MHz). If DP3364S accepts the
-//! faster CLK, same POST_SCAN_CYCLES gives same refresh freq at half
-//! dark — the one remaining lever for significantly brighter output.
-//! Risk: chip may produce corrupted output above some CLK threshold.
-//! Test carefully with E25 pattern. ~1 hr including
-//! recovery-from-corruption.
+//! Outcome: **no practical brightness lever here; 37.5 MHz DCLK is
+//! the ceiling for this panel.**
 //!
-//! ### 2. Thread B — mechanism dive (scientific, not operational)
+//! - `clkdiv=1` (75 MHz): gross corruption on E25, required
+//!   power-cycle to recover. Shift chain can't tolerate 75 MHz.
+//! - `clkdiv=1.5` (50 MHz avg): intermittent glitching.
+//! - `clkdiv=1.75` (43 MHz avg): *worse* than 1.5 despite lower
+//!   average — which was the key finding.
+//!
+//! **Why fractional clkdivs fail:** PIO synthesises non-integer
+//! rates by interleaving N- and (N+1)-cycle ticks to match the
+//! average. Individual DCLK periods dip to the clkdiv=1
+//! instantaneous rate (75 MHz) — exactly what failed in the
+//! integer test. The DP3364S chain sees those instantaneous
+//! peaks, not the average, so any clkdiv between 1 and 2
+//! intermittently fails.
+//!
+//! Only integer clkdivs are usable for HUB75-style shift chains.
+//! With clkdiv=1 out of reach and clkdiv=2 working cleanly,
+//! clkdiv=2 is the ceiling. Brightness optimisation via DCLK is
+//! closed out.
+//!
+//! (Implication: if a future build used a different panel or
+//! shorter/better-shielded cable, the integer-clkdiv=1 test
+//! would be worth re-running; but the *fractional* path is a
+//! dead end regardless.)
+//!
+//! ### 1. Thread B — mechanism dive (scientific, not operational)
 //!
 //! We know *what* works (program swap creates pipeline reset) but not
 //! *why* the chip treats the swap as a discontinuity. Candidates from
@@ -101,13 +121,13 @@
 //! Not needed for shippable correctness; would deepen understanding
 //! of the DP3364S family. ~2-4 hr.
 //!
-//! ### 3. Extended-uptime run
+//! ### 2. Extended-uptime run
 //!
 //! spwm_17 has only been tested for seconds. Leave it running for
 //! hours and confirm: no drift, no sync loss, no accumulating echo
 //! from some rare event, no thermal effects. Cheap to start.
 //!
-//! ### 4. `pack_pixels` profiling on core 1
+//! ### 3. `pack_pixels` profiling on core 1
 //!
 //! Core 1 takes ~26 ms per frame. Adding timing inside `core1_task`
 //! would reveal where (gamma LUT? bit-shuffle? fill?). If we can
@@ -115,27 +135,27 @@
 //! freeing it for application work. Independent of display-flicker
 //! work. ~1 hr.
 //!
-//! ### 5. Real-content test
+//! ### 4. Real-content test
 //!
 //! We've only tested static grey, static E25, and scrolling rainbow.
 //! Feed real images (USB display input, photo data, video frames) and
 //! verify no surprises. Required before considering any downstream
 //! application.
 //!
-//! ### 6. Thread C — productionise
+//! ### 5. Thread C — productionise
 //!
 //! Extract spwm_17's architecture into a clean library crate with
 //! `Display::new` / `display.present(&framebuffer)` API. Hide DMA,
 //! program swap, SIO FIFO, startup flush behind the facade. Defer
-//! until (3) and (5) pass — productionising an untested architecture
+//! until (2) and (4) pass — productionising an untested architecture
 //! is premature.
 //!
 //! ## Suggested order
 //!
-//! Either (1) or (3) depending on appetite: (1) if feeling
-//! investigative (the last lever for brightness), (3) if wanting to
-//! build confidence (just leave it running). (2), (4), (5), (6) after
-//! those.
+//! Either (1) or (2) depending on appetite: (1) if feeling
+//! investigative (explain the program-swap mechanism), (2) if wanting
+//! to build confidence (just leave spwm_17 running). (3), (4), (5)
+//! after those.
 //!
 //! ## Current demo default
 //!

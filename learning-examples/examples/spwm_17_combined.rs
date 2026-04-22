@@ -103,6 +103,22 @@ const ECHO_TEST: bool = false;
 /// effect when `ECHO_TEST = true`.
 const MOVING: bool = true;
 
+/// Data-phase PIO clock divisor. Fixed at 2 after the 2026-04-22
+/// experiment. Tested values:
+///   - 2.0 (37.5 MHz DCLK): clean. Current operating point.
+///   - 1.0 (75 MHz):        gross corruption, power-cycle required.
+///   - 1.5, 1.75:           worse-than-1.0 intermittent corruption.
+///
+/// The fractional-divisor failures were the key finding: PIO
+/// synthesises a fractional rate by interleaving N-cycle and
+/// (N+1)-cycle ticks to hit the *average*, not by generating a
+/// uniform mid-rate clock. Any clkdiv between 1 and 2 thus contains
+/// individual DCLK periods at the clkdiv=1 instantaneous rate
+/// (75 MHz), which the DP3364S shift chain cannot tolerate. Only
+/// integer divisors produce a jitter-free DCLK. With clkdiv=1 out
+/// of reach, `clkdiv=2` is the brightness ceiling for this panel.
+const DATA_CLKDIV: u16 = 2;
+
 // ── Timing instrumentation (DWT cycle counter) ──────────────────────
 const SYS_CLK_MHZ: u32 = 150;
 const DEMCR: u32      = 0xE000_EDFC;
@@ -443,8 +459,8 @@ fn wait_txstall(sm_stall_bit: u32) {
     }
 }
 
-fn set_clkdiv(int_div: u32) {
-    unsafe { (SM0_CLKDIV as *mut u32).write_volatile(int_div << 16) };
+fn set_clkdiv(int_div: u16) {
+    unsafe { (SM0_CLKDIV as *mut u32).write_volatile((int_div as u32) << 16) };
 }
 
 fn swap_sm0_program(execctrl: u32, pinctrl: u32, program_start: u32) {
@@ -543,7 +559,7 @@ fn main() -> ! {
             .out_shift_direction(hal::pio::ShiftDirection::Right)
             .autopull(true)
             .pull_threshold(32)
-            .clock_divisor_fixed_point(2, 0)
+            .clock_divisor_fixed_point(DATA_CLKDIV, 0)
             .build(sm0);
 
     data_sm.set_pindirs([
@@ -630,8 +646,10 @@ fn main() -> ! {
 
     defmt::info!("spwm_17 (program-swap + fixed-rate refresh) starting");
     defmt::info!(
-        "POST_SCAN_CYCLES={=u32} → expected ~65 Hz, ~17% dark",
+        "POST_SCAN_CYCLES={=u32}  DATA_CLKDIV={=u16} (DCLK ≈ {=u32} MHz)",
         POST_SCAN_CYCLES as u32,
+        DATA_CLKDIV,
+        SYS_CLK_MHZ / (DATA_CLKDIV as u32 * 2),
     );
 
     // ── 5. DMA — single channel ──────────────────────────────────────
@@ -659,7 +677,7 @@ fn main() -> ! {
         swap_sm0_program(scan_execctrl, scan_pinctrl, scan_start);
     };
     let swap_to_data = || {
-        set_clkdiv(2);
+        set_clkdiv(DATA_CLKDIV);
         swap_sm0_program(data_execctrl, data_pinctrl, data_start);
     };
 
