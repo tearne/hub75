@@ -97,6 +97,12 @@ pub static IMAGE_DEF: hal::block::ImageDef = hal::block::ImageDef::secure_exe();
 ///           unambiguous, as it did in spwm_12/15 evaluation.
 const ECHO_TEST: bool = false;
 
+/// Freeze the rainbow pattern (offset always 0) for brightness
+/// comparison. Motion masks small brightness differences — use
+/// `MOVING = false` when probing dark-fraction tradeoffs. Has no
+/// effect when `ECHO_TEST = true`.
+const MOVING: bool = true;
+
 // ── Timing instrumentation (DWT cycle counter) ──────────────────────
 const SYS_CLK_MHZ: u32 = 150;
 const DEMCR: u32      = 0xE000_EDFC;
@@ -159,11 +165,24 @@ const DATA_LATCH_STRIDE: usize = 1 + DATA_LATCH_WORDS;                // 33
 const FRAME_WORDS: usize =
     DATA_LATCH_OFFSET + LATCHES_PER_FRAME * DATA_LATCH_STRIDE;        // 16 936
 
-/// Scan cycles per data phase. With scan pass ≈ 258 µs and data phase
-/// ≈ 2.6 ms, `POST_SCAN_CYCLES = 50` yields ~64 Hz data-phase rate and
-/// ~17 % dark. Matches brightness_12 measurement. Raise to increase
-/// brightness (reduce dark fraction) at the cost of data-phase Hz;
-/// lower to push refresh Hz higher at the cost of more dark time.
+/// Scan cycles per data phase. Chosen by the 2026-04-22 sweep:
+///
+/// | cycles | data freq | dark % | verdict                       |
+/// |-------:|----------:|-------:|-------------------------------|
+/// |     20 |   ~129 Hz |  ~37 % | flicker-free, clearly dim     |
+/// |     30 |    ~98 Hz |  ~27 % | flicker-free, subtly dim      |
+/// |     50 |     65 Hz |  17 %  | **sweet spot — comfortable**  |
+/// |     57 |     58 Hz |  15 %  | borderline flicker            |
+/// |     65 |    ~51 Hz |   —    | visible flicker               |
+/// |     80 |    ~42 Hz |   —    | clear flicker                 |
+///
+/// Flicker edge is at ~58 Hz data rate (just above the textbook
+/// ~60 Hz fusion threshold once you account for subjective comfort
+/// margin). Brightness rolls off only when dark fraction roughly
+/// doubles — 17 % → 27 % is barely visible on still content, but
+/// 17 % → 37 % is obvious. Going above 50 costs flicker with
+/// essentially no brightness gain. Going below 50 costs brightness
+/// (especially on still content) with flicker margin you don't need.
 const POST_SCAN_CYCLES: usize = 50;
 
 // ── Double-buffered frame data ───────────────────────────────────────
@@ -342,7 +361,8 @@ fn fill_pixels(offset: u8) {
                     Rgb::BLACK
                 }
             } else {
-                let hue = (row as u16 + col as u16 + offset as u16) as u8;
+                let eff_offset = if MOVING { offset } else { 0 };
+                let hue = (row as u16 + col as u16 + eff_offset as u16) as u8;
                 hsv(hue)
             };
         }
@@ -610,7 +630,7 @@ fn main() -> ! {
 
     defmt::info!("spwm_17 (program-swap + fixed-rate refresh) starting");
     defmt::info!(
-        "POST_SCAN_CYCLES={=u32} → expected ~64 Hz, ~17% dark",
+        "POST_SCAN_CYCLES={=u32} → expected ~65 Hz, ~17% dark",
         POST_SCAN_CYCLES as u32,
     );
 

@@ -1,15 +1,20 @@
-//! # DP3364S S-PWM — Step 4: Dual-Core Packing
+//! # DP3364S S-PWM — Step 14: No-Pin-Handover Dual-SM Probe
 //!
-//! Fourth in the SPWM progression. Builds on `spwm_3_dual_pio.rs`.
+//! Dual-SM (SM0 data / SM1 scan) variant used as a brightness-vs-flicker
+//! probe in the spwm_12 → spwm_17 investigation. Originally hypothesised
+//! to be cheaper than single-SM (no handover cost); measurement
+//! disproved that — see "Remaining limitation" below.
 //!
 //! **What this step adds:** core 1 handles `fill_pixels` + `pack_pixels`
 //! while core 0 drives the display via PIO+DMA. Double-buffered frame
 //! data ensures no tearing.
 //!
 //! **Architecture:** core 0 scans continuously from chip SRAM, only
-//! pausing briefly (~2.6ms) to DMA new frame data when core 1 signals
-//! a freshly packed buffer is ready. Brightness is constant regardless
-//! of how long packing takes — scan duty cycle is decoupled from pack
+//! pausing to DMA new frame data when core 1 signals a freshly packed
+//! buffer is ready. The data phase takes ~2.6 ms (PIO transfer time
+//! for the 16 936-word frame buffer at clkdiv=2: ~160 ns/word). During
+//! this time the panel is dark. Brightness is constant regardless of
+//! how long packing takes — scan duty cycle is decoupled from pack
 //! performance.
 //!
 //! ```text
@@ -22,17 +27,22 @@
 //!
 //! Communication via SIO FIFO (hardware mailbox between cores).
 //!
-//! **Remaining limitation:** each data load requires a ~2.6ms dark gap
-//! for the SM0↔SM1 handover (shared CLK pin). At high pack rates this
-//! is imperceptible (frequent short gaps = steady dim). At low pack
-//! rates (<60 FPS) individual gaps become visible as flicker. Eliminating
-//! this would require a single-SM architecture that interleaves data
-//! loading with scan — no handover, no dark gap.
+//! **Remaining limitation (corrected 2026-04-21):** each data load
+//! produces a ~2.6 ms dark gap. Originally framed as an SM0↔SM1
+//! handover cost, but measurement showed the gap is identical in the
+//! single-SM port (`spwm_15`) — it is the PIO transfer time itself,
+//! not the handover. Dual-SM also suffers a separate "echo" artefact
+//! (rows 0/32 retain a ghost of the previous frame), which single-SM
+//! *does* fix. Finally, visible flicker in this example is not the
+//! gap duration — it's the data-phase frequency: when data rate ties
+//! to core 1's pack rate (~39 Hz here), it sits below the ~60 Hz
+//! fusion threshold. The architectural fix is fixed-rate refresh
+//! (see `spwm_12` / `spwm_17`), not handover elimination.
 //!
 //! ## Run
 //!
 //! ```sh
-//! cargo run --release --example spwm_4_dual_core
+//! cargo run --release --example spwm_14_no_pin_handover
 //! ```
 
 #![no_std]

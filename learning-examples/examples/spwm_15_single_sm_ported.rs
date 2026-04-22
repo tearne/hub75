@@ -3,8 +3,12 @@
 //! Fifteenth in the SPWM progression. **Confirmed working** — a single
 //! SM0 running two PIO programs (swapped at each data↔scan phase
 //! boundary) drives the panel **without the scan_line-31 → scan_line-0
-//! echo** that spwm_12 exhibits, and **without the ~2.6 ms dual-SM
-//! handover dark gap** that limits spwm_14.
+//! echo** that spwm_12 exhibits. (Earlier framing also claimed this
+//! eliminated the "~2.6 ms dual-SM handover dark gap"; measurement on
+//! 2026-04-21 showed the dark gap is identical between dual-SM and
+//! single-SM. The gap is PIO transfer time for the 16 936-word frame
+//! buffer, not a handover cost. Single-SM's real architectural win is
+//! echo elimination — the gap is unchanged.)
 //!
 //! ## Confirmed result (2026-04-21)
 //!
@@ -32,21 +36,25 @@
 //! the program-swap looks different to the chip is the interesting
 //! follow-up question.
 //!
-//! ## Open observation — brightness
+//! ## Brightness (resolved 2026-04-21)
 //!
-//! spwm_15 appears **slightly dimmer** than spwm_14 at a glance, but
-//! on thin test lines this is hard to judge. Worth a proper side-by-
-//! side comparison under realistic load (full-frame image, not just
-//! source-row lines) before calling the architecture finished.
+//! Side-by-side on full-frame grey (`brightness_14` vs `brightness_15`
+//! probes, `MOVING=false`, `GREY_LEVEL=128`): **no meaningful difference**.
+//! spwm_14 ≈ spwm_15 ≈ spwm_17. Architecture choice does not change
+//! brightness at this scale — the dark-gap fraction is the same.
 //!
-//! ## Why single-SM matters (project goal context)
+//! ## Why single-SM matters (project goal context — updated)
 //!
-//! Project goal ranking: **flicker > brightness > framerate**. Dual-SM
-//! designs like spwm_14 impose a ~2.6 ms dark gap on every data load
-//! (SM0/SM1 handover on the shared CLK pin). At high pack rates that
-//! averages into a steady dim; at low pack rates it flickers visibly.
-//! A working single-SM architecture would eliminate the handover dark
-//! gap entirely and remove the main flicker source.
+//! Project goal ranking: **flicker > brightness > framerate**.
+//! Single-SM's architectural contribution is **echo elimination**,
+//! not flicker reduction — both single- and dual-SM share the same
+//! ~2.6 ms data-phase dark gap. The separate flicker problem is
+//! **frequency-driven**: tying data-phase rate to core 1's pack rate
+//! (~39 Hz) puts it below the ~60 Hz fusion threshold, regardless of
+//! dark fraction. The flicker fix is fixed-rate refresh (see `spwm_12`
+//! / `spwm_17`), combined with single-SM's echo fix. spwm_15 alone
+//! gives you echo-free but still-flickery output; it's a stepping
+//! stone, not the final architecture.
 //!
 //! ## What the echo investigation has narrowed the mechanism to
 //!

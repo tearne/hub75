@@ -1,9 +1,11 @@
-//! # DP3364S S-PWM — Step 16: next-steps plan (living document)
+//! # DP3364S S-PWM — Step 18: next-steps plan (living document)
 //!
 //! Placeholder example whose sole purpose is to hold the current plan
 //! as doc comments. No code; running it does nothing.
 //!
-//! Last updated: 2026-04-21, end of session.
+//! Last updated: 2026-04-22 (POST_SCAN_CYCLES sweep complete; file
+//! renamed 16→18 so it sits after the working baseline
+//! `spwm_17_combined`).
 //!
 //! ## Where we are
 //!
@@ -50,36 +52,45 @@
 //! works. These are follow-ups ordered by rough value-to-effort ratio.
 //! Review the order against project priorities before committing.
 //!
-//! ### 1. Doc hygiene (low effort, high clarity payoff)
+//! ### ~~1. POST_SCAN_CYCLES sweep in spwm_17~~ — DONE 2026-04-22
 //!
-//! Correct the misleading "~2.6 ms handover gap" framing in:
-//!   - `spwm_14_no_pin_handover.rs` header (paragraph about the dark
-//!     gap reason — still says handover).
-//!   - `spwm_15_single_sm_ported.rs` header (open brightness question
-//!     is now closed; "perhaps a little dimmer" text is resolved).
-//!   - This file (consider replacing Thread-A section entirely with
-//!     the summary above).
-//! Rationale: current text will mislead future-us. ~30 minutes.
+//! Results (measured on-panel, full-frame static rainbow):
 //!
-//! ### 2. POST_SCAN_CYCLES sweep in spwm_17
+//! | cycles | data freq | dark % | verdict                       |
+//! |-------:|----------:|-------:|-------------------------------|
+//! |     20 |   ~129 Hz |  ~37 % | flicker-free, clearly dim     |
+//! |     30 |    ~98 Hz |  ~27 % | flicker-free, subtly dim      |
+//! |     50 |     65 Hz |  17 %  | **sweet spot — comfortable**  |
+//! |     57 |     58 Hz |  15 %  | borderline flicker            |
+//! |     65 |    ~51 Hz |   —    | visible flicker               |
+//! |     80 |    ~42 Hz |   —    | clear flicker                 |
 //!
-//! Map the brightness-vs-flicker tradeoff curve for this chip. Run
-//! spwm_17 at `POST_SCAN_CYCLES` ∈ {20, 30, 50, 80, 120} and record:
-//!   - data freq (Hz) — must stay above ~60 for flicker-free
-//!   - dark fraction
-//!   - subjective brightness and flicker
-//! Serves flicker > brightness > framerate priority. ~1 hr.
+//! Findings:
+//!   - Flicker edge is at ~58 Hz data rate — just above the textbook
+//!     ~60 Hz fusion threshold once subjective comfort margin is
+//!     accounted for. 50 cycles (65 Hz) has comfortable margin.
+//!   - Brightness perception is log-response: 17 % → 27 % dark is
+//!     barely visible on still content, 17 % → 37 % is obvious.
+//!     Motion masks small brightness differences; A/B with still
+//!     pattern exposes them.
+//!   - Going above 50 costs flicker with essentially no brightness
+//!     gain. Going below 50 costs brightness with flicker margin
+//!     you don't need.
+//!   - **Operating default fixed at `POST_SCAN_CYCLES = 50`.** The
+//!     only remaining lever for more brightness is shrinking the
+//!     data phase itself — task (1) below.
 //!
-//! ### 3. PIO data clkdiv=1 experiment (risky)
+//! ### 1. PIO data clkdiv=1 experiment (risky)
 //!
 //! Halve the data-phase dark gap by doubling PIO data-path clock
 //! (75 → 150 MHz → DCLK 37.5 → 75 MHz). If DP3364S accepts the
-//! faster CLK, this compounds with (2) — same refresh freq at half
-//! dark, or higher refresh freq at same dark. Risk: chip may produce
-//! corrupted output above some CLK threshold. Test carefully with
-//! E25 pattern. ~1 hr including recovery-from-corruption.
+//! faster CLK, same POST_SCAN_CYCLES gives same refresh freq at half
+//! dark — the one remaining lever for significantly brighter output.
+//! Risk: chip may produce corrupted output above some CLK threshold.
+//! Test carefully with E25 pattern. ~1 hr including
+//! recovery-from-corruption.
 //!
-//! ### 4. Thread B — mechanism dive (scientific, not operational)
+//! ### 2. Thread B — mechanism dive (scientific, not operational)
 //!
 //! We know *what* works (program swap creates pipeline reset) but not
 //! *why* the chip treats the swap as a discontinuity. Candidates from
@@ -90,13 +101,13 @@
 //! Not needed for shippable correctness; would deepen understanding
 //! of the DP3364S family. ~2-4 hr.
 //!
-//! ### 5. Extended-uptime run
+//! ### 3. Extended-uptime run
 //!
 //! spwm_17 has only been tested for seconds. Leave it running for
 //! hours and confirm: no drift, no sync loss, no accumulating echo
 //! from some rare event, no thermal effects. Cheap to start.
 //!
-//! ### 6. `pack_pixels` profiling on core 1
+//! ### 4. `pack_pixels` profiling on core 1
 //!
 //! Core 1 takes ~26 ms per frame. Adding timing inside `core1_task`
 //! would reveal where (gamma LUT? bit-shuffle? fill?). If we can
@@ -104,38 +115,40 @@
 //! freeing it for application work. Independent of display-flicker
 //! work. ~1 hr.
 //!
-//! ### 7. Real-content test
+//! ### 5. Real-content test
 //!
 //! We've only tested static grey, static E25, and scrolling rainbow.
 //! Feed real images (USB display input, photo data, video frames) and
 //! verify no surprises. Required before considering any downstream
 //! application.
 //!
-//! ### 8. Thread C — productionise
+//! ### 6. Thread C — productionise
 //!
 //! Extract spwm_17's architecture into a clean library crate with
 //! `Display::new` / `display.present(&framebuffer)` API. Hide DMA,
 //! program swap, SIO FIFO, startup flush behind the facade. Defer
-//! until (5) and (7) pass — productionising an untested architecture
+//! until (3) and (5) pass — productionising an untested architecture
 //! is premature.
 //!
 //! ## Suggested order
 //!
-//! (1) first — costs nothing, prevents confusion. Then either (2) or
-//! (5) depending on appetite: (2) if feeling investigative (more
-//! numbers, more curves), (5) if wanting to build confidence (just
-//! leave it running). (3), (4), (6), (7), (8) after those.
+//! Either (1) or (3) depending on appetite: (1) if feeling
+//! investigative (the last lever for brightness), (3) if wanting to
+//! build confidence (just leave it running). (2), (4), (5), (6) after
+//! those.
 //!
 //! ## Current demo default
 //!
-//! `spwm_17_combined.rs` ships with `ECHO_TEST=false` (scrolling
-//! rainbow). Flip to `true` for the E25 static four-block pattern
-//! that exposes echo. Everything else is a `cargo run --release
+//! `spwm_17_combined.rs` ships with `ECHO_TEST=false` + `MOVING=true`
+//! (scrolling rainbow). Flip `ECHO_TEST` to `true` for the E25 static
+//! four-block pattern that exposes echo. Flip `MOVING` to `false` to
+//! freeze the rainbow for brightness A/B probing — motion masks small
+//! brightness differences. Everything else is a `cargo run --release
 //! --example <name>` away.
 //!
 //! ```sh
 //! # Do not run this file — it's just the plan.
-//! # cargo run --release --example spwm_16_next_steps
+//! # cargo run --release --example spwm_18_next_steps
 //! ```
 
 #![no_std]
@@ -151,7 +164,7 @@ pub static IMAGE_DEF: hal::block::ImageDef = hal::block::ImageDef::secure_exe();
 
 #[hal::entry]
 fn main() -> ! {
-    defmt::info!("spwm_16 is a planning placeholder; see header for next steps.");
+    defmt::info!("spwm_18 is a planning placeholder; see header for next steps.");
     loop {
         cortex_m::asm::wfe();
     }
