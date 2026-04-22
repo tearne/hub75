@@ -3,9 +3,9 @@
 //! Placeholder example whose sole purpose is to hold the current plan
 //! as doc comments. No code; running it does nothing.
 //!
-//! Last updated: 2026-04-22 (POST_SCAN_CYCLES sweep + clkdiv
-//! experiment complete; file renamed 16→18 so it sits after the
-//! working baseline `spwm_17_combined`).
+//! Last updated: 2026-04-22 (POST_SCAN_CYCLES sweep, clkdiv experiment,
+//! datasheet-driven register sweep all complete; operating point
+//! rebaselined to in-spec clocking and max current).
 //!
 //! ## Where we are
 //!
@@ -81,34 +81,59 @@
 //!     data phase itself — see the clkdiv experiment below, which
 //!     closed that door.
 //!
-//! ### ~~1. PIO data clkdiv=1 experiment~~ — DONE 2026-04-22
+//! ### ~~1. PIO data clkdiv experiment~~ — DONE 2026-04-22
 //!
-//! Outcome: **no practical brightness lever here; 37.5 MHz DCLK is
-//! the ceiling for this panel.**
+//! Outcome (initial): no practical brightness lever via overclocking.
+//!   - `clkdiv=1` (75 MHz): gross corruption, power-cycle required.
+//!   - `clkdiv=1.5` (50 MHz avg): intermittent glitching.
+//!   - `clkdiv=1.75` (43 MHz avg): *worse* than 1.5.
 //!
-//! - `clkdiv=1` (75 MHz): gross corruption on E25, required
-//!   power-cycle to recover. Shift chain can't tolerate 75 MHz.
-//! - `clkdiv=1.5` (50 MHz avg): intermittent glitching.
-//! - `clkdiv=1.75` (43 MHz avg): *worse* than 1.5 despite lower
-//!   average — which was the key finding.
+//! **Fractional clkdivs are a dead end** for HUB75 shift chains:
+//! PIO synthesises non-integer rates by interleaving N- and
+//! (N+1)-cycle ticks, so instantaneous periods always dip to the
+//! floor rate — at any clkdiv ∈ (1,2) the chain intermittently
+//! sees the 75 MHz instantaneous rate and fails. Only integer
+//! divisors are usable.
 //!
-//! **Why fractional clkdivs fail:** PIO synthesises non-integer
-//! rates by interleaving N- and (N+1)-cycle ticks to match the
-//! average. Individual DCLK periods dip to the clkdiv=1
-//! instantaneous rate (75 MHz) — exactly what failed in the
-//! integer test. The DP3364S chain sees those instantaneous
-//! peaks, not the average, so any clkdiv between 1 and 2
-//! intermittently fails.
+//! Outcome (follow-up after datasheet): dropped clkdiv to 3
+//! (DCLK = 25 MHz, in-spec per §6.1 max FCLK). Visually
+//! **indistinguishable** from clkdiv=2 (37.5 MHz) — overclocking
+//! was costing us reliability for ~7 pp of invisible dark fraction.
+//! **Operating clkdiv rebaselined to 3.**
 //!
-//! Only integer clkdivs are usable for HUB75-style shift chains.
-//! With clkdiv=1 out of reach and clkdiv=2 working cleanly,
-//! clkdiv=2 is the ceiling. Brightness optimisation via DCLK is
-//! closed out.
+//! ### ~~1b. DP3364S register sweep~~ — DONE 2026-04-22
 //!
-//! (Implication: if a future build used a different panel or
-//! shorter/better-shielded cable, the integer-clkdiv=1 test
-//! would be worth re-running; but the *fractional* path is a
-//! dead end regardless.)
+//! Triggered by finding the datasheet (now checked in at
+//! `reference/DP3364S/`) plus HUB320 register tables on the hzeller
+//! collation thread. Both surfaced that our `CONFIG_REGS` was only
+//! writing 13 of the chip's 15 registers, and the one we cared about
+//! most — `reg0x08`, the output-current scale — was at an
+//! arbitrary-looking `0xBF` (191).
+//!
+//! **reg 0x08 A/B** (baseline 0xBF vs test value), in-spec clock:
+//!   - 0x80 (128): clearly dimmer — knob works.
+//!   - 0xDF (223): a bit brighter than 0xBF.
+//!   - 0xFF (255): brighter still. No instability observed.
+//!
+//! **reg 0x0F A/B** (0x10 nominal vs 0x20 HUB320) with reg0x08=0xFF:
+//!   - No visible difference. LEDs appear saturated at reg0x08=0xFF
+//!     and 0x0F can't push further. Settled at 0x10 (no reason to
+//!     pick the nominal-higher-current value for zero gain).
+//!
+//! **reg 0x0E**: undocumented in our datasheet copy. HUB320 writes
+//! per-colour values but no reference tells us what they mean.
+//! Decision: leave unwritten (accept chip's power-on default
+//! rather than blind-poke an undocumented register).
+//!
+//! **Operating point rebaselined** (all in CONFIG_REGS):
+//!   - clkdiv = 3 (25 MHz, in-spec)
+//!   - POST_SCAN_CYCLES = 50 (from earlier sweep)
+//!   - reg 0x08 = 0xFF (max current)
+//!   - reg 0x0F = 0x10 (nominal, explicit)
+//!   - reg 0x0E omitted
+//!
+//! Net vs start of session: same or brighter, fully in-spec, no
+//! undocumented register pokes. Unusual win.
 //!
 //! ### 1. Thread B — mechanism dive (scientific, not operational)
 //!

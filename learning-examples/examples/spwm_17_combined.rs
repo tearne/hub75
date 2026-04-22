@@ -101,23 +101,29 @@ const ECHO_TEST: bool = false;
 /// comparison. Motion masks small brightness differences — use
 /// `MOVING = false` when probing dark-fraction tradeoffs. Has no
 /// effect when `ECHO_TEST = true`.
-const MOVING: bool = true;
+const MOVING: bool = true; // demo default; set false to freeze for brightness probes
 
-/// Data-phase PIO clock divisor. Fixed at 2 after the 2026-04-22
-/// experiment. Tested values:
-///   - 2.0 (37.5 MHz DCLK): clean. Current operating point.
-///   - 1.0 (75 MHz):        gross corruption, power-cycle required.
-///   - 1.5, 1.75:           worse-than-1.0 intermittent corruption.
+/// Data-phase PIO clock divisor. Settled at 3 (DCLK = 25 MHz,
+/// in-spec per datasheet §6.1 max FCLK) after A/B on 2026-04-22:
+/// clkdiv=2 (37.5 MHz, overclocked) gave no visible brightness
+/// benefit over clkdiv=3 on our panel — the ~7 pp extra dark
+/// fraction is imperceptible at these refresh rates. Dropping to
+/// spec buys reliability margin and lifetime for essentially free.
 ///
-/// The fractional-divisor failures were the key finding: PIO
-/// synthesises a fractional rate by interleaving N-cycle and
-/// (N+1)-cycle ticks to hit the *average*, not by generating a
-/// uniform mid-rate clock. Any clkdiv between 1 and 2 thus contains
-/// individual DCLK periods at the clkdiv=1 instantaneous rate
-/// (75 MHz), which the DP3364S shift chain cannot tolerate. Only
-/// integer divisors produce a jitter-free DCLK. With clkdiv=1 out
-/// of reach, `clkdiv=2` is the brightness ceiling for this panel.
-const DATA_CLKDIV: u16 = 2;
+/// History of other tested values:
+///   - 1.0  (75 MHz):  gross corruption, power-cycle required.
+///   - 1.5  (avg 50):  intermittent — fractional clkdiv's period
+///                     jitter contains clkdiv=1 instantaneous peaks.
+///   - 1.75 (avg 43):  worse than 1.5, more jitter bursts.
+///   - 2.0  (37.5):    worked, but overclocked 50 % over spec.
+///   - 3.0  (25.0):    in-spec, visually identical to 2.0 — chosen.
+///
+/// Fractional clkdivs are a dead end for HUB75 shift chains
+/// regardless of target average rate (period jitter always hits
+/// the N=floor instantaneous rate). Only integer divisors are
+/// usable. See `reference/DP3364S/README.md` for details.
+const DATA_CLKDIV: u16 = 3;
+
 
 // ── Timing instrumentation (DWT cycle counter) ──────────────────────
 const SYS_CLK_MHZ: u32 = 150;
@@ -152,9 +158,19 @@ const ALL_RGB: u32 = R0 | G0 | B0 | R1 | G1 | B1;
 const SCAN_LINES: usize = 32;
 
 // ── DP3264S / DP3364S configuration registers ────────────────────────
-const CONFIG_REGS: [u16; 13] = [
+// Values chosen 2026-04-22 after an A/B sweep on-panel:
+//   - reg 0x08 = 0xFF (max output-current scale, §10 Iout formula).
+//     Sweep across 0x80 / 0xBF / 0xDF / 0xFF showed 0xBF → 0xFF is
+//     visibly brighter with no instability on our panel.
+//   - reg 0x0F = 0x10 (datasheet-nominal base trim, 70 µA bracket
+//     factor). A/B'd against HUB320's 0x20: no visible difference,
+//     consistent with LED saturation at reg0x08=0xFF.
+// reg 0x0E is deliberately left out — undocumented in our copy of the
+// datasheet. Writing an undefined value is pure risk.
+const CONFIG_REGS: [u16; 14] = [
     0x1100, 0x021F, 0x037F, 0x043F, 0x0504, 0x0642, 0x0700,
-    0x08BF, 0x0960, 0x0ABE, 0x0B8B, 0x0C88, 0x0D12,
+    0x08FF, 0x0960, 0x0ABE, 0x0B8B, 0x0C88, 0x0D12,
+    0x0F10,
 ];
 
 // ── Per-command CLK counts ───────────────────────────────────────────
@@ -430,7 +446,7 @@ fn core1_task() {
 
         fill_pixels(offset);
         pack_pixels(buf);
-        update_wr_cfg(buf, (offset as usize / 2) % 13);
+        update_wr_cfg(buf, (offset as usize / 2) % CONFIG_REGS.len());
         fifo_write(1);
     }
 }
@@ -646,7 +662,7 @@ fn main() -> ! {
 
     defmt::info!("spwm_17 (program-swap + fixed-rate refresh) starting");
     defmt::info!(
-        "POST_SCAN_CYCLES={=u32}  DATA_CLKDIV={=u16} (DCLK ≈ {=u32} MHz)",
+        "POST_SCAN_CYCLES={=u32}  DATA_CLKDIV={=u16} (DCLK ≈ {=u32} MHz, in-spec)",
         POST_SCAN_CYCLES as u32,
         DATA_CLKDIV,
         SYS_CLK_MHZ / (DATA_CLKDIV as u32 * 2),
@@ -726,6 +742,7 @@ fn main() -> ! {
     let mut data_count: u32 = 0;
     let mut last_report = now_cycles();
 
+
     loop {
         // Data phase — always fires, regardless of core-1 pack state.
         // If core 1 hasn't produced a new frame yet, we re-load the
@@ -784,6 +801,7 @@ fn main() -> ! {
 
         // Periodic report — every ~1 s of wall time.
         let now = now_cycles();
+
         if now.wrapping_sub(last_report) >= SYS_CLK_MHZ * 1_000_000 {
             let scan_avg_us = if scan_count > 0 {
                 (scan_cy_total / (SYS_CLK_MHZ as u64 * scan_count as u64)) as u32

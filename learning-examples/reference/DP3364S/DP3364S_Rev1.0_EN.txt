@@ -1,0 +1,1005 @@
+                                                                                              DP3364S
+
+DP3364S 16 Channel 64 scans Low-turning PWM Constant Current Driver
+
+1 Overview
+    DP3364S is a common anode 16-channel low turn PWM constant current driver chip designed for LED
+display,the chip integrates high-precision current generation circuit technology, so that the current error
+between the chips can be controlled within 2.0%, and integrates a variety of exclusive technology to improve
+the display effect of LED display, bring more improvement for the display effect.
+                                                              Optimize the display effect
+2 Features                                                     -   improve low gray uniformity
+   Power supply voltage range：2.6～5.5V                        -   improve the first line darkening
+   Operating temperature range：-40℃～85℃                       -   improve up and down ghosting
+   Scanned area ： 1 ～ 64 scans ， arbitrarily                  -   improve high-low gray coupling
+    adjustable                                                 -   improve coupling of adjacent modules
+   16 constant current output channels                       Internal Integration PLL produces internal GCLK
+   Support non-external resistor mode                         with lower EMI
+   Constant current output range                             Encapsulation mode：QSOP24/QFN24
+    -   0.5mA～18mA （Vout=0.3V）
+    -   0.5mA～25mA （Vout=0.6V）
+   Inter-channel current error
+    -   Typical value：±1.2% Max：±2.0%
+   Inter-chip current error
+                                                           3 Application Fields
+    -   Typical value：±0.2% Max：±2.0%                         High refresh rate LED video display
+   Supports up to 128x frame rate                            LED full-color display
+   High gray independent refresh, no inter-frame             High density and small pitch LED panel display
+    black field
+
+
+
+
+                                      DP3364S Typical Application Schematic
+
+
+ 2024/4/15                                      www.depuw.com                                              1
+ DP3364S_REV1.0_EN
+The contents of the document are confidential and may not be reproduced or transmitted in any form by any
+                                  organization or individual without permission！
+                                                                                                                                                                                     DP3364S
+                              DP3364S 16 Channel 64 scans Low-turning PWM Constant Current Driver
+
+                                                                                               Content
+
+1 Overview ........................................................................................... 1           9.1.3 High and low gray interference and coupling
+                                                                                                                   display bad effect optimization .......................................17
+2 Features .............................................................................................1
+                                                                                                            10 Instruction and Register .........................................................18
+3 Application Fields .......................................................................... 1
+                                                                                                               10.1 Register Instruction ......................................................... 18
+4 Products Description ....................................................................4
+                                                                                                               10.2 Data Instructions .............................................................. 18
+5 Electric schematic diagram ........................................................ 5
+                                                                                                               10.3 Single/Double Mode Switch ........................................ 18
+    5.1 Input/Output Equivalent Circuit ...................................... 5
+                                                                                                               10.4 Write Register ....................................................................20
+    5.2 Internal Circuit Block Diagram ......................................... 6
+                                                                                                               10.5 Register Signal Sending Way .......................................20
+6 Parameter List ................................................................................. 7
+                                                                                                               10.6 ROW Signal Sending Way .............................................20
+    6.1 Maximum Limit Parameter ................................................ 7
+                                                                                                               10.7 PWM Display Mode ........................................................ 21
+    6.2 Electrical Characteristics ..................................................... 7
+                                                                                                                   10.7.1 General Frame Synchronization Mode ............ 22
+    6.3 Dynamic Characteristics ..................................................... 9
+                                                                                                                   10.7.2
+7 Test Circuit Diagram .................................................................. 10
+                                                                                                                   Hi g h Gr a y Da t a Re f r e s h Fr a m e Sy n c h r o n i z a t i o n M o
+    7.1 Test Circuit 1 .........................................................................10
+                                                                                                                   .....................................................................................................22
+    7.2 Test Circuit 2 .........................................................................10
+                                                                                                                   10.7.3 High-gray data Independently Refreshes
+    7.3 Test Circuit 3 .........................................................................11                 Asynchronous Mode ........................................................... 22
+
+    7.4 Test Circuit 4 .........................................................................11                 10.7.4 low gray and high brush mode .......................... 23
+    7.5 Test Circuit 5 .........................................................................12             10.8 Relevant Configuration of PWM Display .................23
+    7.6 Test Circuit 6 .........................................................................12
+                                                                                                                   10.8.1 Number of Row Scans Configured ................... 23
+    7.7 Test Circuit 7 .........................................................................13
+                                                                                                                   10.8.2 Row Grayscale Configuration ..............................23
+8 Typical Characteristic Diagram ...............................................13
+                                                                                                                   10.8.3 PWM Display Packet Configuration ..................23
+    8.1 Constant Current Source Inflection point ............... 13
+                                                                                                                   10.8.4 Internal Grayscale Clock Configuration ...........24
+    8.2 Adjust Output Current by An External Resistance . 14
+                                                                                                                   10.8.5 PWM Gray scales Series & Gamma Generation24
+    8.3 Current Gain without External Resistance
+                                                                                                               10.9 Open Circuit Detection and Removal of Bad Spots24
+    mode,adjust current with register ....................................... 15
+                                                                                                            11 Package cooling power(PD) ...................................................24
+9 Typical Display Effect Image .................................................. 15
+                                                                                                            12 Load Terminal Voltage(VLED) .............................................. 25
+    9.1 Display Effect ........................................................................15
+                                                                                                            13 Encapsulation Information .................................................... 26
+         9.1.1 Remove Open Circuit Bad Spot Crosses ........... 15
+                                                                                                            14 Important statement ...................... 错误！未定义书签。
+         9.1.2 Remove Ghosting and coupling Effects ........... 16
+
+
+
+
+  2024/4/15                                                                                 www.depuw.com                                                                                                           2
+  DP3364S_REV1.0_EN
+The contents of the document are confidential and may not be reproduced or transmitted in any form by any
+                                                             organization or individual without permission！
+                                                                                             DP3364S
+                                                                                        DP3364S
+                                                                              16 通道 PWM 恒流驱动
+                                           Declaration
+    Version        Date          Reviser                         Revised Contents
+     V1.0         2024.04      Wang Mei     Original Version
+
+
+
+
+ 2024/4/15                                  www.depuw.com                                             3
+ DP3364S_REV1.0_EN
+The contents of the document are confidential and may not be reproduced or transmitted in any form by any
+                             organization or individual without permission！
+                                                                                                  DP3364S
+               DP3364S 16 Channel 64 scans Low-turning PWM Constant Current Driver
+
+4 Products Description
+   Pin Definition
+
+
+
+
+            QSOP24 Pin Definition Diagram                           QFN24 Pin Definition Diagram
+
+   Pin Description
+
+QSOP24 Pin No.       QFN24 Pin NO.          Pin Name                            Pin Description
+       1                    10                GND          Chip Grounding Terminal
+       2                    23                 SDI         Serial Data Input Terminal
+       3                    24                CLK          Serial Clock Input
+       4                    1                  LE          Data and Instruction Latch , different LE length
+                                                           represents different instructions
+     5～20             2～9    11～18       OUT0～OUT15        Constant Current Output Terminal
+       21                   20                ROW          Row Switching Signal
+       22                   19                SDO          Serial Data Output
+       23                   21                REXT         Connect the External Resistance Terminal
+
+       24                   22                VDD          POWER END
+
+
+
+
+ 2024/4/15                                     www.depuw.com                                                  4
+ DP3364S_REV1.0_EN
+The contents of the document are confidential and may not be reproduced or transmitted in any form by any
+                                 organization or individual without permission！
+                                                                                          DP3364S
+                DP3364S 16 Channel 64 scans Low-turning PWM Constant Current Driver
+
+     Product Purchase Information
+
+     Product Name       Encapsulation mode    Packing Method       Quantity/Disc        Humidity Level
+                            QSOP24                Tape                 4000
+        DP3364S                                                                            MSL=3
+                             QFN24                Tape                 5000
+
+     Product Marking
+
+
+
+
+                        QSOP24                                                 QFN24
+
+
+
+    DP3364S is the product name.
+    XXXXXX represents the product batch number.
+
+5 Electric schematic diagram
+       5.1 Input/Output Equivalent Circuit
+
+               SDI,CLK,LE,OE Input terminal                       SDO Output terminal
+
+
+
+
+ 2024/4/15                                    www.depuw.com                                              5
+ DP3364S_REV1.0_EN
+The contents of the document are confidential and may not be reproduced or transmitted in any form by any
+                              organization or individual without permission！
+                                                                                         DP3364S
+              DP3364S 16 Channel 64 scans Low-turning PWM Constant Current Driver
+
+     5.2 Internal Circuit Block Diagram
+
+
+
+
+                                        Internal circuit diagram
+
+
+
+
+ 2024/4/15                                  www.depuw.com                                             6
+ DP3364S_REV1.0_EN
+The contents of the document are confidential and may not be reproduced or transmitted in any form by any
+                             organization or individual without permission！
+                                                                                                       DP3364S
+                  DP3364S 16 Channel 64 scans Low-turning PWM Constant Current Driver
+
+6 Parameter List
+       6.1 Maximum Limit Parameter
+                          Project                         Symbol                  Rated Value                   Unit
+
+                      Supply Voltage                           VDD                   0～6                         V
+                      Output Current                            IO                       25                     mA
+                       Input Voltage                           VIN               -0.4 ～ VDD+0.4                  V
+                 Output withstand voltage                      VOUT                      11                      V
+                      Clock frequency                          FCLK                      25                 MHz
+                  Operating Temperature                        Topr                -40 ～ 85                      ℃
+                   Storage Temperature                         Tstg                -55 ～ 150                     ℃
+     All voltage values are based on the chip grounding terminal (GND) as a reference point, and the test
+      temperature for the maximum limit parameter is 25℃.
+     If the actual working conditions exceed the specified value may cause permanent damage to the
+      components; If the actual operating conditions are slightly below the maximum and work for a long time,
+      the reliability of the component may be reduced. The above values are only partially specified, and this
+      product does not support functional operation under other conditions outside the specifications.
+     The maximum peak welding temperature of surface paste products shall not exceed 260℃. The
+      temperature curve shall be set by the factory according to J-STD-020 standard, the actual situation of
+      the factory and the solder paste manufacturer's suggestion.
+
+
+       6.2 Electrical Characteristics
+
+（Unless otherwise specified，VDD=3.5V～5V，Ta=25℃）
+
+                                        Test                                        Mini        Typical   Max
+       Project            Symbol                      Test Condition                                                   Unit
+                                       Circuit                                     Value        Value     Value
+                                                     VDD=5V,REXT=1K
+                          VR_TT                                                      -          1.484       -           V
+                                                   IGAIN=100%,Ta=25℃
+
+                           VR_LT                   VDD=5V             Ta=-40℃        -          1.468       -           V
+    REXT voltage                                  REXT=1K
+                                         1
+    characteristics       VR_HT                  IGAIN=100%            Ta=85℃        -          1.492       -           V
+
+                          VR_LV                   Ta=25℃              VDD=5.5V       -          1.487       -           V
+                                                  REXT=1K
+                          VR_HV                  IGAIN=100%           VDD=2.6V       -          1.494       -           V
+
+ Constant current                                 VDD=5.0V            IOUT=18m
+                           VOUT1                                                     -           350        -          mV
+ output inflection                       2         REXT=1k               A
+        point              VOUT2                  Inflection          IOUT=9mA       -           290        -          mV
+
+
+
+ 2024/4/15                                        www.depuw.com                                                         7
+ DP3364S_REV1.0_EN
+The contents of the document are confidential and may not be reproduced or transmitted in any form by any
+                                    organization or individual without permission！
+                                                                                             DP3364S
+                DP3364S 16 Channel 64 scans Low-turning PWM Constant Current Driver
+                                            point level 0       IOUT=4.5m
+                       VOUT3                                                     -    260          -   mV
+                                                                   A
+                                                                IOUT=18m
+                       VOUT4                  VDD=5.0V                           -    460          -   mV
+                                                                   A
+                                              REXT=1k
+                       VOUT5                                    IOUT=9mA         -    390          -   mV
+                                              inflection
+                                            point level 1       IOUT=4.5m
+                       VOUT6                                                     -    360          -   mV
+                                                                   A
+ Constant current      IOUT                   inflection point level 0        0.5       -       18     mA
+  source output                      2
+                       IOUT1                  inflection point level 1        0.5       -       25     mA
+      range
+ Constant current
+  source output        DCHIP         2               VDS=0.6V                 —       ±1.5     ± 2.0   %
+      range
+ Inter-chip output
+                       DCHL          2               VDS=0.6V                 —       ± 1.2    ±2.5    %
+   current error
+  Output current
+  error between        %/ΔVDS        2            VDS=0.3~3.0V                —        —       ± 1.0   %/V
+     channels
+ Constant current
+                       %/ΔVDD        2           VDD=3.5V~5.0V                —        —       ± 1.0   %/V
+error/VDS variation
+output voltage at
+                       VO(ON)        2             OUT0~OUT15                 0.3       -      VDD     V
+          ON
+               High
+                        IOH                                                   —       -22       —      mA
+SDO drive      Level
+                                     3                VDD=5V
+ current        Low
+                        IOL                                                   —        23       —      mA
+               Level
+               High
+ Output                 VOH                         IOH=-1mA                  4.6      —        —      V
+               Level
+  Level                              4
+                Low
+                        VOL                          IOL=1mA                  —        —        0.4    V
+               Level
+               High
+                        VIH                                 -               0.7*VDD     -      VDD     V
+SDO drive      Level
+                                     5
+ current        Low                                                                           0.3*V
+                        VIL                                 -                GND        -              V
+               Level                                                                          DD
+
+
+
+
+ 2024/4/15                                    www.depuw.com                                             8
+ DP3364S_REV1.0_EN
+The contents of the document are confidential and may not be reproduced or transmitted in any form by any
+                                organization or individual without permission！
+                                                                                            DP3364S
+                DP3364S 16 Channel 64 scans Low-turning PWM Constant Current Driver
+
+     6.3 Dynamic Characteristics
+
+（Unless otherwise specified，VDD=3.5V～5V，Ta=25℃）
+
+                                                                            Mini    Typical   Max
+      Project          Symbol       Test Circuit      Test Condition                                  Unit
+                                                                            Value   Value     Value
+  CLK-SDO delay         TPHL                                                    -     15        -     ns
+  CLK-SDO delay         TPLH                                                    -     15        -     ns
+ Constant Current                                       VDD=5V，
+                       TPHL1                                                    -     25        -     ns
+ Output Rise Time                                    FDCLK=12.5MHz
+                                         7
+  Constant current
+                       TPLH1                                                    -     15        -     ns
+ output drop time
+  CLK-SDO delay          TR                           IOUT=10mA，                -     65        -     ns
+  CLK-SDO delay          TF                             ΔVOUT=3V                -     50        -     ns
+
+
+
+
+                                          Single-edge time series
+
+
+
+
+                                         Double -edge time series
+
+ 2024/4/15                                    www.depuw.com                                             9
+ DP3364S_REV1.0_EN
+The contents of the document are confidential and may not be reproduced or transmitted in any form by any
+                               organization or individual without permission！
+                                                                                         DP3364S
+              DP3364S 16 Channel 64 scans Low-turning PWM Constant Current Driver
+
+7 Test Circuit Diagram
+     7.1 Test Circuit 1
+   External resistance voltage
+
+
+
+
+                                     Test circuit 1 schematic diagram
+
+     7.2 Test Circuit 2
+   Constant current output inflection point voltage & corresponding inflection point current (under
+    open circuit detection)
+
+
+
+
+                                     Test circuit 2 schematic diagram
+
+ 2024/4/15                                  www.depuw.com                                            10
+ DP3364S_REV1.0_EN
+The contents of the document are confidential and may not be reproduced or transmitted in any form by any
+                              organization or individual without permission！
+                                                                                         DP3364S
+              DP3364S 16 Channel 64 scans Low-turning PWM Constant Current Driver
+
+     7.3 Test Circuit 3
+   IOH、IOL
+
+
+
+
+                                     Test circuit 3 schematic diagram
+
+     7.4 Test Circuit 4
+   VOH、VOL
+
+
+
+
+                                     Test circuit 4 schematic diagram
+
+
+
+
+ 2024/4/15                                  www.depuw.com                                            11
+ DP3364S_REV1.0_EN
+The contents of the document are confidential and may not be reproduced or transmitted in any form by any
+                             organization or individual without permission！
+                                                                                         DP3364S
+              DP3364S 16 Channel 64 scans Low-turning PWM Constant Current Driver
+
+     7.5 Test Circuit 5
+   VIH、VIL
+
+
+
+
+                                     Test circuit 5 schematic diagram
+
+     7.6 Test Circuit 6
+   Power supply current
+
+
+
+
+                                     Test circuit 6 schematic diagram
+
+
+
+
+ 2024/4/15                                  www.depuw.com                                            12
+ DP3364S_REV1.0_EN
+The contents of the document are confidential and may not be reproduced or transmitted in any form by any
+                             organization or individual without permission！
+                                                                                           DP3364S
+               DP3364S 16 Channel 64 scans Low-turning PWM Constant Current Driver
+
+     7.7 Test Circuit 7
+   Dynamic Characteristic
+
+
+
+
+                                        Test circuit 7 schematic diagram
+
+8 Typical Characteristic Diagram
+     8.1 Constant Current Source Inflection point
+When the DP3364S is applied to LED displays, Chip-Chip Skew and channel skew is minimal ,it is due to the
+DP3364S having excellent constant current output characteristics:
+   The maximum channel current error on-chip       is less than ±2.5%, and the maximum inter- chip current
+    error is less than ±2.0%;
+   When the load terminal voltage (V-out) changes, the stability of the output current is not affected, as
+    shown in the figure below:
+
+
+
+
+ 2024/4/15                                     www.depuw.com                                           13
+ DP3364S_REV1.0_EN
+The contents of the document are confidential and may not be reproduced or transmitted in any form by any
+                                 organization or individual without permission！
+                                                                                          DP3364S
+               DP3364S 16 Channel 64 scans Low-turning PWM Constant Current Driver
+          Low inflection Point mode and VDD=2.6~5V, relationship curve between IOUT and VOUT
+
+
+
+
+             Non- Low inflection Point mode and VDD=2.6~5V, IOUT and VOUT relationship curve
+
+     8.2 Adjust Output Current by An External Resistance
+Output current value is calculated by the following formula：
+                                          �����∗��
+                                 ���� =
+                                            ����
+                                                     , 20% ≤ IGAIN ≤ 200%
+
+The REXT in the formula is the resistance value between ground and the chip's 23PIN port. For example,
+when the current gain IGAIN=100%, REXT=1kΩ, the formula works out the IOUT value 18mA。
+
+
+
+
+                           IGAIN=100%, the relationship between REXT and Iout
+
+
+
+
+ 2024/4/15                                    www.depuw.com                                              14
+ DP3364S_REV1.0_EN
+The contents of the document are confidential and may not be reproduced or transmitted in any form by any
+                              organization or individual without permission！
+                                                                                               DP3364S
+                 DP3364S 16 Channel 64 scans Low-turning PWM Constant Current Driver
+
+       8.3 Current Gain without External Resistance mode,adjust current
+
+             with register
+The output current value is calculated by the following formula：
+
+      Iout=[70uA+0.4uA*(reg0x0f<6:0>-16)]*reg0x08<7:0>*(1+0.5*reg0x0b<5>)
+
+
+9      Typical Display Effect Image
+     The specific display effect will be affected by the conditions of the lamp board and register parameters.
+      The following test results are for reference only.
+
+       9.1 Display Effect
+
+9.1.1 Remove Open Circuit Bad Spot Crosses
+      The following is a comparison of the display effect before and after removing the open circuit bad
+      spot cross, you can see:
+     Chip can remove the bad cross well after opening the function removing the open bad cross
+      function,and optimize the display effect.
+
+
+
+
+    Display Effect before Removing open circuit bad         Display effect after removing the open circuit
+                        spots cross                                          bad spot cross
+
+
+
+
+ 2024/4/15                                       www.depuw.com                                               15
+ DP3364S_REV1.0_EN
+The contents of the document are confidential and may not be reproduced or transmitted in any form by any
+                                 organization or individual without permission！
+                                                                                           DP3364S
+              DP3364S 16 Channel 64 scans Low-turning PWM Constant Current Driver
+
+9.1.2 Remove Ghosting and coupling Effects
+Below is the removal of ghosting and no band lighting effect, you can see:
+ Oblique scanning ghost, text ghost and other problems cannot be observed.
+ Highlight block with bright, oblique scan superimposed highlight block with bright test results are very
+    good.
+ Chip shows good display effect.
+
+
+
+
+     Slanted scan ghosting test display effect                 Text ghosting test display effect
+
+
+
+
+   Highlight block with light test display effect      Oblique scan superimposed highlight block with
+                                                                    light test display effect
+
+
+
+
+ 2024/4/15                                   www.depuw.com                                            16
+ DP3364S_REV1.0_EN
+The contents of the document are confidential and may not be reproduced or transmitted in any form by any
+                              organization or individual without permission！
+                                                                                         DP3364S
+              DP3364S 16 Channel 64 scans Low-turning PWM Constant Current Driver
+
+9.1.3 High and low gray interference and coupling display bad
+
+       effect optimization
+The following figure is the optimization effect of high-low gray interference and coupling display poor
+effects, you can see:
+ The low gray coupling of the black block and the low gray coupling of the white block are not sensed.
+ Chip shows good display effect.
+
+
+
+
+ Black block on the low gray ,coupling test effect    White block on the low gray, coupling test effect
+
+
+
+
+ 2024/4/15                                  www.depuw.com                                            17
+ DP3364S_REV1.0_EN
+The contents of the document are confidential and may not be reproduced or transmitted in any form by any
+                             organization or individual without permission！
+                                                                                            DP3364S
+              DP3364S 16 Channel 64 scans Low-turning PWM Constant Current Driver
+
+10 Instruction and Register
+
+     10.1 Register Instruction
+                   Instruction Name        LE                      Description
+                  DATA_LATCH               1      Latch 16bit data to SRAM
+                  VSYNC                    3      Update Display Data
+                  WR_CFG                   5      Write Register
+                  PRE_ACT                  14     Write Enable
+                  DDR                      2      Enter Double-edge Mode
+                  SDR                      15     Enter Single-edge Mode
+
+     10.2 Data Instructions
+                    Data sending               Line                     Channel
+                        Sequence
+                           1                Line 0               Channel 15（OUT15）
+                           2                                     Channel 14（OUT14）
+                          ……                                              ……
+                          16                                       Channel 0（OUT0）
+                          17                Line 1               Channel 15（OUT15）
+                          18                                     Channel 14（OUT14）
+                          ……                                              ……
+                          32                                       Channel 0（OUT0）
+                                                      ……
+                         1009              Line 63               Channel 15（OUT15）
+                         1010                                    Channel 14（OUT14）
+                          ……                                              ……
+                         1024                                      Channel 0（OUT0）
+
+     10.3 Single/Double Mode Switch
+
+         1.Data are collected at the rising edge of the CLK signal in single edge mode； Data are collected at
+    the rising&falling edge of the CLK signal in Double edge mode.
+         2. CLK rising edge counting is used for fixed OE signal width.
+         3. The command for single-mode and dual-mode along mode switchover needs to be sent once
+    after it is powered on.
+         4.Need to enter the single edge mode after power-on, send the command shown in the following
+    figure.
+
+
+
+
+ 2024/4/15                                      www.depuw.com                                            18
+ DP3364S_REV1.0_EN
+The contents of the document are confidential and may not be reproduced or transmitted in any form by any
+                                organization or individual without permission！
+                                                                                           DP3364S
+               DP3364S 16 Channel 64 scans Low-turning PWM Constant Current Driver
+
+
+
+
+                            SDR15 DCLK edges (up + down) are set to SDR
+
+★ IF need to enter the double-edge mode after power-on, You need to send the commands shown in the
+image below:
+
+
+
+
+                                The two DCLK rising edges are set to DDR
+
+   USER want to switch single -edge mode /double-edge mode when debug, operation is as follows：
+      If you are already in double-edge mode and need to enter single-edge mode, sending the following
+   command。
+
+
+
+
+                           In double edge mode, 15 DCLK edges (up + down) are set to SDR
+        If already in single edge mode, you need to enter double edge mode
+
+
+
+
+                     In single-edge mode, the two DCLK rising edges are set to DDR
+
+ 2024/4/15                                  www.depuw.com                                            19
+ DP3364S_REV1.0_EN
+The contents of the document are confidential and may not be reproduced or transmitted in any form by any
+                             organization or individual without permission！
+                                                                                                DP3364S
+               DP3364S 16 Channel 64 scans Low-turning PWM Constant Current Driver
+
+      10.4 Write Register
+    Send PRE_ACT first, then run WR_CFG, LE is 5 DCLK width, the first input 8bit is the register address bit,
+
+the last input 8bit is the data bit of the corresponding register address.
+
+    For example：
+
+    {A7, A6, A5, A4, A3, A2, A1, A0} = 8’b0000_0111;
+
+    {D7, D6, D5, D4, D3, D2, D1, D0}=8’b1001_1101;
+
+    That is, register 0x07 (8 'b0000_0111) is set to 8' b1001_1101.
+
+      10.5 Register Signal Sending Way
+    The specific driving methods are as follows：
+
+
+
+
+     As shown in the figure above, the order of sending instructions and data in each frame：
+     1. Send VSYNC.
+     2. Send PRE_ACT.
+     3. Send WR_CFG and write the register configuration. Each frame can only write a register value of one
+        address, and 15 frames complete the refresh of all registers (a total of 15 valid register addresses) to
+        save configuration time.
+
+     4. Send DAT_LAT several times to write display data with SDI.
+     5. The data sending bit is displayed as 16 bits.
+
+      10.6 ROW Signal Sending Way
+The DP3364S integrated on-chip GCLK generation circuit changes the OE signal of the universal constant
+current chip to the ROW signal, using the ROW.
+The rising edge of the ROW represents the beginning of a row display, where the high level width of the
+ROW has two types, namely:
+     1.W12: The high-level width of the ROW is 12 DCLK width
+     2.W4: The high-level width of the ROW is 4 DCLK width
+
+
+
+
+ 2024/4/15                                      www.depuw.com                                                20
+ DP3364S_REV1.0_EN
+The contents of the document are confidential and may not be reproduced or transmitted in any form by any
+                                organization or individual without permission！
+                                                                                         DP3364S
+              DP3364S 16 Channel 64 scans Low-turning PWM Constant Current Driver
+   As shown in the figure above, when ROW signals are sent, only the first ROW of Group 1 (Line 0) needs
+to send ROW signals of W12, and other ROW signals are sent according to W4.
+
+     10.7 PWM Display Mode
+    DP3364S integrated four PWM display modes：
+    1. General frame synchronization mode; 2. High-gray data independent refresh synchronous mode;
+    3. High-gray data independently refreshes asynchronous mode; 4. Low Ash High Brush mode .
+
+
+
+
+ 2024/4/15                                  www.depuw.com                                            21
+ DP3364S_REV1.0_EN
+The contents of the document are confidential and may not be reproduced or transmitted in any form by any
+                             organization or individual without permission！
+                                                                                           DP3364S
+              DP3364S 16 Channel 64 scans Low-turning PWM Constant Current Driver
+
+
+
+
+10.7.1       General Frame Synchronization Mode
+    Working mode and related configurations as follow：
+    1. Configure REG0X0C [7:6] = 0 and set the PWM display mode to Universal Frame Sync Mode
+    2. The number of DCLK per line is calculated using the Formula
+    3. The configuration shows the number of data sets, REG0X03[6:0] = refresh rate/frame rate -1
+    4. After VSYNC, display the first Line (Line 0) of Group 1(Group 0)
+    5. Stop displaying data from the current frame until the next VSYNC comes
+
+
+10.7.2       High      Gray       Data       Refresh        Frame         Synchronization           Model
+
+       Independently
+    Working mode and related configuration:
+    1. Set the PWM display mode to the high gray data independent refresh frame synchronization mode
+    2. Calculate a set of display time = frame cycle/(refresh rate/frame rate)
+    3. Calculate the display time of a row = a group of display time/the number of rows
+    4. The number of DCLK in each row is calculated according to the formula, which is met by adjusting the
+    gray level of the row, DCLK frequency and register reg0x06[1:0]
+    5.ROW is continuously transmitted at a fixed display frequency without interruption. The frequency of
+    the ROW is independent of VSYNC. The frequency of the ROW signal = the display time of 1/ ROW =
+    the time between the rising edges of 1/ row
+    6. ROW 0 of group 0 sends ROW signals of W12. In other cases, ROW signals of W4 are sent. Each row
+    signal (number of groups x number of row scans) contains only one W12.
+
+10.7.3       High-gray data Independently Refreshes Asynchronous Mode
+    Working mode and related configuration:
+    1. Set the PWM display mode to the asynchronous mode of high gray data independent refresh
+
+ 2024/4/15                                    www.depuw.com                                             22
+ DP3364S_REV1.0_EN
+The contents of the document are confidential and may not be reproduced or transmitted in any form by any
+                              organization or individual without permission！
+                                                                                               DP3364S
+                 DP3364S 16 Channel 64 scans Low-turning PWM Constant Current Driver
+    2. The number of DCLKS in each row is calculated according to the formula;
+    Display the number of data groups manually. The default value is 64 groups (reg0x03[6:0]=7 'h3f);
+  3. ROW is continuously transmitted at a fixed display frequency without interruption. The ROW
+     frequency is independent of VSYNC. ROW signal frequency = 1/display time of ROW = 1/Time
+     between rising edges of row;
+  4. ROW 0 of group 0 sends ROW signals of W12, and ROW signals of W4 are sent in other cases. Each row
+     signal (number of groups (according to register configuration value) * number of row scans) has only
+     one W12, and it keeps cycling in this way.
+  5. Visual refresh rate=1/(time of display one line*Numbers of scans).
+
+10.7.4       low gray and high brush mode
+    Working mode and related configuration:
+    1. Set PWM display mode to low gray and high brush mode
+    2. The number of groups displayed is manually configured (the default is 64 groups).
+    3. The numbers of DCLK is calculated according to the formula, and calculated the display time of a row ;
+    4. Calculate one group display time = a row display time *scans
+    5. Calculate all group display time = one group display time * Number of groups,
+    6. High brush rate (int) = frame cycle/display time of all groups
+    7. Two VSYNC need to send Numbers of ROW signal= high brush rate * number of display groups *
+    scans
+    8. Display Line 1 (Line 0) of Group 1 (Group 0) after VSYNC
+    9. The current frame data display high brush rate after the display stops until the arrival of the next
+    VSYNC
+    10. Visual refresh rate = frame rate * number s of group * High brush rate=(3840/7680)*high brush rate
+    11. The low gray and high brush mode only needs to change the ROW signal according to the above
+    steps, and the gray level does not need to be adjusted
+
+
+     10.8 Relevant Configuration of PWM Display
+
+10.8.1       Number of Row Scans Configured
+    DP3364S supports up to 64 line scans;
+
+10.8.2       Row Grayscale Configuration
+    reg0x04[6:0] represents the PWM display length of a row, the PWM display length of a row =
+reg0x04[6:0]+1, the maximum support line gray level 32X4=128
+
+10.8.3       PWM Display Packet Configuration
+    reg0x03[6:0] indicates the number of PWM display packets. The number of PWM display packets =
+reg0x03[6:0]+1. The maximum number of supported packets is 128;
+    In frame synchronization mode, PWM displays the number of packets = refresh rate/frame rate;configure
+reg0x03[6:0]-1
+
+
+ 2024/4/15                                    www.depuw.com                                                   23
+ DP3364S_REV1.0_EN
+The contents of the document are confidential and may not be reproduced or transmitted in any form by any
+                               organization or individual without permission！
+                                                                                           DP3364S
+                 DP3364S 16 Channel 64 scans Low-turning PWM Constant Current Driver
+
+    In asynchronous mode, PWM display packets can be configured independently (independent of refresh
+rate);
+
+10.8.4          Internal Grayscale Clock Configuration
+    DP3364S integrates PLL on chip to produce gray clock GCLK. The relevant calculation formula is as
+follows:
+
+
+
+
+         FGCLK=FDCLK*(reg0x06[2:0]+1)
+
+
+
+
+10.8.5         PWM Gray scales Series & Gamma Generation
+    PWM gray level (maximum)= Line gray level *PWM display group
+    Gamma can be calculated and generated according to the PWM gray level (maximum) (this part is
+generated by the control card manufacturer according to their own gamma generation formula)
+    The maximum chip gray level supports only 14bit.
+
+         10.9 Open Circuit Detection and Removal of Bad Spots
+    Selected【Remove bad spots】：reg0x0c[1]=1 ；
+
+    Non-selected【Remove bad spots】：reg0x0c[1]=0
+
+11 Package cooling power(PD)
+                                                                                                   (Tj  Ta )
+The maximum heat dissipation power of the encapsulation is determined by the formula: PD (max) 
+                                                                                                   Rth ( j  a )
+When all 16 channels are open, the actual power is：
+PD ( act )  IDD *VDD  IOUT * Duty *VDS *16
+To ensure that PD(act)≤PD(max) output maximum current and duty cycle relationship is：
+
+           Tj  Ta
+                       ( IDD *VDD )
+           Rth(j - a)
+IOUT（max）
+             VDS * Duty *16
+
+Therein Tj is the junction temperature （ Tj=150 ℃ ） ， Ta is the ambient temperature ， VDS is the constant
+
+current output       port voltage ， Duty is the duty cycle ， and Rth( j-a) is the thermal resistance of the
+
+encapsulation.
+
+ 2024/4/15                                           www.depuw.com                                            24
+ DP3364S_REV1.0_EN
+The contents of the document are confidential and may not be reproduced or transmitted in any form by any
+                                       organization or individual without permission！
+                                                                                         DP3364S
+              DP3364S 16 Channel 64 scans Low-turning PWM Constant Current Driver
+
+                    encapsulation             Rth( j-a)(℃/W)            PD(max)(W)
+                        QSOP24                     62                     2.01
+                         QFN24                    41.8                    2.99
+
+
+
+
+12 Load Terminal Voltage(VLED)
+ In order to optimize the heat dissipation capacity of the package, it is recommended that the best
+operating range of the output terminal voltage (VDS) is 0.3V to 1.0V(IOUT= 0.5-36mA). If VDS=VLED-VF and
+VLED=5V, the high output voltage (VDS) may cause PD (act) > PD (max); In this case, it is recommended to
+use the lowest possible VLED voltage for use, and an external resistor or voltage regulator can also be
+used as a VDROP. This results in VDS=(VLED-VF)-VDROP, which reduces the input voltage (VDS) value. The
+application diagram of the external series resistor or voltage regulator can be referred to the following
+figure.
+
+
+
+
+ 2024/4/15                                  www.depuw.com                                            25
+ DP3364S_REV1.0_EN
+The contents of the document are confidential and may not be reproduced or transmitted in any form by any
+                             organization or individual without permission！
+                                                                                         DP3364S
+                  DP3364S 16 Channel 64 scans Low-turning PWM Constant Current Driver
+
+13 Encapsulation Information
+   QSOP24 Plastic Encapsulation Specification Drawing
+
+
+
+
+                                                     Millimeters (mm)
+                                        Min                                   Max
+             A                           —                                    1.95
+             A1                         0.05                                  0.35
+             A2                         1.05                                   —
+             b                          0.1                                    0.4
+             c                          0.05                                  0.254
+             D                          8.2                                    9.2
+             E1                         3.6                                    4.2
+             E                          5.6                                    6.5
+             e                                           0.635TYP
+             L                          0.3                                    1.5
+             θ                           0°                                    10°
+
+
+
+
+ 2024/4/15                                    www.depuw.com                                          26
+ DP3364S_REV1.0_EN
+The contents of the document are confidential and may not be reproduced or transmitted in any form by any
+                             organization or individual without permission！
+                                                                                            DP3364S
+                 DP3364S 16 Channel 64 scans Low-turning PWM Constant Current Driver
+
+   QFN24 Plastic Encapsulation Specification Drawing
+
+
+
+
+                                                      Millimeters (mm)
+                                         Min                                     Max
+             A                       0.700/0.800                              0.800/0.900
+             A1                         0.000                                   0.050
+             A3                                           0.203REF
+             D                          3.924                                   4.076
+             E                          3.924                                   4.076
+             D1                          2.6                                      2.8
+             E1                          2.6                                      2.8
+             k                                            0.20MIN
+             b                          0.200                                   0.300
+             e                                            0.500TYP
+             L                          0.324                                   0.476
+
+
+
+
+ 2024/4/15                                  www.depuw.com                                            27
+ DP3364S_REV1.0_EN
+The contents of the document are confidential and may not be reproduced or transmitted in any form by any
+                             organization or individual without permission！
+                                                                                                 DP3364S
+                 DP3364S 16 Channel 64 scans Low-turning PWM Constant Current Driver
+
+14 Official Announcement
+
+Division I will ensure the accuracy and reliability of the product specification document, but we reserve the
+right to independently modify the content of the specification document without prior notice to the
+customer. Before placing an order, customers should contact us to obtain the latest relevant information and
+verify that this information is complete and up-to-date. All product sales are subject to the sales terms and
+conditions provided by our company at the time of order confirmation.
+
+Division I will periodically update the content of this document. Actual product parameters may vary due to
+differences in models or other factors. This document does not serve as any express or implied guarantee or
+authorization.
+
+The product specification does not include any authorization for the intellectual property owned by our
+company or any third party. With respect to the information contained in this product specification, we make
+no explicit or implied warranties, including but not limited to the accuracy of the specification, its fitness for
+commercial use, suitability for specific purposes, or non-infringement of our company's or any third party's
+intellectual property. We also do not assume any responsibility for any incidental or consequential losses
+related to this specification document and its use.
+
+We do not assume any obligations regarding application assistance or customer product design. Customers
+are responsible for their own use of our company's products and applications. In order to minimize risks
+associated with customer products and applications, customers should provide thorough design and
+operational safety validation.
+
+The reproduction, transmission or use of this document or its contents is not permitted without express
+written authority. Once discovered, the company will pursue its legal responsibility according to law and
+compensate for all losses caused to the company.
+
+Please note that the product is used within the conditions described in this document, paying particular
+attention to the absolute maximum rating, operating voltage range, and electrical characteristics. The
+Company shall not be liable for any damage caused by malfunctions, accidents, etc. caused by the use of the
+product outside the conditions stated in this document.
+
+Division I has been committed to improving the quality and reliability of products, but all semiconductor
+products have a certain probability of failure, which may lead to some personal accidents, fire accidents,
+etc.When designing products, pay full attention to redundancy design and adopt safety indicators, so as to
+avoid accidents.
+
+When using our chips to produce products, Division I shall not be liable for any patent dispute arising from
+the use of the chip in the product, the specification of the product, or the country of import, etc., in the
+event of a patent dispute over the products including the chip.
+
+
+
+
+ 2024/4/15                                      www.depuw.com                                                 28
+ DP3364S_REV1.0_EN
+The contents of the document are confidential and may not be reproduced or transmitted in any form by any
+                                 organization or individual without permission！
+
