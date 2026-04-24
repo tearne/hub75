@@ -1117,6 +1117,26 @@ fn build_scan_buf() {
     }
 }
 
+// ── Timing instrumentation (DWT cycle counter) ──────────────────────
+const SYS_CLK_MHZ: u32 = 150;
+const DEMCR: u32      = 0xE000_EDFC;
+const DWT_CTRL: u32   = 0xE000_1000;
+const DWT_CYCCNT: u32 = 0xE000_1004;
+
+fn enable_cycle_counter() {
+    unsafe {
+        let demcr = (DEMCR as *const u32).read_volatile();
+        (DEMCR as *mut u32).write_volatile(demcr | (1 << 24));
+        (DWT_CYCCNT as *mut u32).write_volatile(0);
+        let ctrl = (DWT_CTRL as *const u32).read_volatile();
+        (DWT_CTRL as *mut u32).write_volatile(ctrl | 1);
+    }
+}
+
+fn now_cycles() -> u32 {
+    unsafe { (DWT_CYCCNT as *const u32).read_volatile() }
+}
+
 // ── Entry point ──────────────────────────────────────────────────────
 
 #[hal::entry]
@@ -1128,6 +1148,8 @@ fn main() -> ! {
         12_000_000, pac.XOSC, pac.CLOCKS, pac.PLL_SYS, pac.PLL_USB,
         &mut pac.RESETS, &mut watchdog,
     ).unwrap();
+
+    enable_cycle_counter();
 
     // ── 2. Pins ──────────────────────────────────────────────────────
     let mut sio_hal = hal::Sio::new(pac.SIO);
@@ -1517,17 +1539,21 @@ fn main() -> ! {
     let mut core1_buf: u8 = 1;
     let mut offset: u8 = 0;
 
-    const TIMER0_BASE: u32 = 0x400B_0000;
-    const TIMELR: *const u32 = (TIMER0_BASE + 0x0C) as *const u32;
-    fn timer_us() -> u32 {
-        unsafe { TIMELR.read_volatile() }
-    }
-    let mut frame_count: u32 = 0;
-    let mut last_report = timer_us();
-
     // Kick off core 1 with the first pack job
     offset = offset.wrapping_add(2);
     fifo_write(offset as u32 | ((core1_buf as u32) << 8));
+
+    // ── Baseline instrumentation ────────────────────────────────────
+    // Per-phase cycle accumulators, reset every REPORT_WINDOW frames.
+    // Cycle units: 150 MHz core clock → 1 cy = 6.67 ns.
+    let mut data_cy_total:  u64 = 0;
+    let mut scan_cy_total:  u64 = 0;   // time spent inside scan DMAs
+    let mut frame_cy_total: u64 = 0;   // whole main-loop iter
+    let mut display_frames: u32 = 0;   // every main-loop iter = 1
+    let mut content_frames: u32 = 0;   // only when core 1 delivered new pack
+    let mut core1_waits:    u32 = 0;   // iters where core 1 wasn't ready
+    let mut last_report_cy: u32 = now_cycles();
+    const REPORT_WINDOW_FRAMES: u32 = 256;
 
     // Split-DMA loop (E19). Each frame goes out as two DMAs with a
     // wait_txstall between:
@@ -1535,6 +1561,8 @@ fn main() -> ! {
     //   gap   (pipeline reset)
     //   DMA 2: post-scan scan words    [SCAN_OFFSET .. FRAME_WORDS]
     loop {
+        let t_frame0 = now_cycles();
+
         let buf_ptr = if active_buf == 0 {
             core::ptr::addr_of!(FRAME_BUF_A) as *const u32
         } else {
@@ -1543,6 +1571,7 @@ fn main() -> ! {
 
         // DMA 1: header + DATA_LATCHes. Match spwm_4's data-phase
         // clkdiv of 2 (75 MHz PIO, ~37.5 MHz DCLK).
+        let t_data0 = now_cycles();
         set_clkdiv(2);
         enable_sm(SM0_EN);
         swap_to_data();
@@ -1584,10 +1613,12 @@ fn main() -> ! {
             }
             wait_txstall(SM0_TXSTALL);
         }
+        data_cy_total += now_cycles().wrapping_sub(t_data0) as u64;
 
         // DMA 2: post-scan region, emitted as POST_SCAN_CYCLES back-
         // to-back 32-word DMAs (mimicking spwm_14's per-group DMA
         // pattern which has a small CPU gap between every group).
+        let t_scan0 = now_cycles();
         set_clkdiv(3);
         enable_sm(SM0_EN);
         swap_to_scan();
@@ -1606,23 +1637,63 @@ fn main() -> ! {
             wait_txstall(SM0_TXSTALL);
         }
         disable_sm(SM0_EN);
+        scan_cy_total += now_cycles().wrapping_sub(t_scan0) as u64;
+
+        display_frames += 1;
+        frame_cy_total += now_cycles().wrapping_sub(t_frame0) as u64;
 
         if fifo_try_read().is_some() {
-            frame_count += 1;
+            content_frames += 1;
             active_buf = core1_buf;
             core1_buf = 1 - active_buf;
             offset = offset.wrapping_add(2);
             fifo_write(offset as u32 | ((core1_buf as u32) << 8));
+        } else {
+            core1_waits += 1;
+        }
 
-            if frame_count & 0xFF == 0 {
-                let now = timer_us();
-                let elapsed_us = now.wrapping_sub(last_report);
-                if elapsed_us > 0 {
-                    let fps_x10 = 2_560_000_000u32 / elapsed_us;
-                    defmt::info!("FPS: {}.{}", fps_x10 / 10, fps_x10 % 10);
-                }
-                last_report = now;
-            }
+        if display_frames >= REPORT_WINDOW_FRAMES {
+            let now = now_cycles();
+            let window_cy = now.wrapping_sub(last_report_cy) as u64;
+
+            // Averages per display-frame (µs).
+            let data_avg_us  = (data_cy_total  / (SYS_CLK_MHZ as u64 * display_frames as u64)) as u32;
+            let scan_avg_us  = (scan_cy_total  / (SYS_CLK_MHZ as u64 * display_frames as u64)) as u32;
+            let frame_avg_us = (frame_cy_total / (SYS_CLK_MHZ as u64 * display_frames as u64)) as u32;
+
+            // Dark ratio = data_cy / (data_cy + scan_cy), in permille.
+            let lit_dark = data_cy_total + scan_cy_total;
+            let dark_permille = if lit_dark > 0 {
+                (data_cy_total * 1000 / lit_dark) as u32
+            } else { 0 };
+
+            // Refresh rates.
+            // Display-frame Hz × 100 (keep one decimal).
+            let display_hz_x100 = if window_cy > 0 {
+                ((display_frames as u64 * SYS_CLK_MHZ as u64 * 100_000_000u64) / window_cy) as u32
+            } else { 0 };
+            let content_hz_x100 = if window_cy > 0 {
+                ((content_frames as u64 * SYS_CLK_MHZ as u64 * 100_000_000u64) / window_cy) as u32
+            } else { 0 };
+            // Per-line refresh = display_hz × POST_SCAN_CYCLES.
+            let line_hz = (display_hz_x100 / 100) * POST_SCAN_CYCLES as u32;
+
+            defmt::info!(
+                "frame {=u32}µs (data {=u32}µs scan {=u32}µs dark {=u32}‰)  display {=u32}.{=u32} Hz  content {=u32}.{=u32} Hz  line {=u32} Hz  core1_waits {=u32}/{=u32}",
+                frame_avg_us, data_avg_us, scan_avg_us, dark_permille,
+                display_hz_x100 / 100, display_hz_x100 % 100,
+                content_hz_x100 / 100, content_hz_x100 % 100,
+                line_hz,
+                core1_waits, display_frames,
+            );
+
+            data_cy_total  = 0;
+            scan_cy_total  = 0;
+            frame_cy_total = 0;
+            display_frames = 0;
+            content_frames = 0;
+            core1_waits    = 0;
+            last_report_cy = now;
         }
     }
 }
