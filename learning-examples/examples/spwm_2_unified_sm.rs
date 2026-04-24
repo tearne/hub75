@@ -1,53 +1,48 @@
-//! # Thread A brightness probe — spwm_12 (split-DMA, unified-program) variant
+//! # DP3364S S-PWM — Step 2: Unified State Machine + Ring-mode DMA
 //!
-//! Purpose: verify the hypothesis that spwm_12's older architecture
-//! flickered less than brightness_14/15 because it **re-displays each
-//! frame at a fixed ~65 Hz** (data + 50 scan cycles per loop iteration),
-//! regardless of core-1 pack rate. brightness_14/15 only trigger a data
-//! phase when core 1 signals a fresh frame, so their data-phase rate
-//! collapses to the ~39 Hz pack rate — well below human flicker fusion.
+//! Second of three S-PWM learning examples. Builds on `spwm_1_pio_cpu`
+//! and is superseded by `spwm_3_autonomous` (the production driver).
 //!
-//! ## Prediction (to be confirmed by this probe)
+//! **What this step adds (two changes bundled):**
 //!
-//! With POST_SCAN_CYCLES=50 at 253 µs/cycle, plus 2.7 ms data:
+//! 1. **Unified PIO state machine.** A single SM handles both data
+//!    loading and scan/display, eliminating the SM-handover dark gap
+//!    that two-SM designs suffer from. Each DMA word starts with a
+//!    1-bit type flag; the PIO reads it and branches — type=0 to the
+//!    data path (shift RGB with CLK/LAT), type=1 to the scan path
+//!    (display period, address latch, OE pulse). No SM disable/
+//!    enable, no pindir handover, no dark gap between phases.
 //!
-//!   - Frame (cycle) rate = 1 / (2.7 + 50 × 0.253) ms ≈ **65 Hz**
-//!   - Dark fraction       = 2.7 / 15.4 ≈ **17.5 %**
+//! 2. **Ring-mode DMA for the scan loop.** The scan DMA (ch1) uses
+//!    RP2350 ring mode with RING_SIZE=7, wrapping the read address
+//!    every 128 bytes (32 words × 4 bytes) and looping through the
+//!    scan buffer indefinitely in silicon — no CPU touch between
+//!    scan passes.
 //!
-//! If the measurements land there, spwm_12's flicker advantage is
-//! confirmed as **higher data-phase frequency** — above fusion for
-//! most observers — even though its dark fraction is *larger* than
-//! brightness_14/15's.
+//! Data DMA (ch0) uses the HAL's single_buffer. Only one channel
+//! runs at a time: ch1 is stopped before ch0 sends frame data, then
+//! ch1 is restarted.
 //!
-//! ## Caveat — echo is present
+//! ```text
+//!   Core 0: start ring scan ch1 → wait core1 → stop ch1
+//!           → DMA data ch0 → restart ch1 → wait core1 → ...
 //!
-//! spwm_12's architecture has the scan_line 31 → scan_line 0 SRAM
-//! echo (the whole subject of the E21–E25 investigation, see
-//! `spwm_12_split_dma.rs`). On a uniform grey flood this doesn't
-//! matter — every row is the same value, so the echo is invisible
-//! (grey echoes grey = grey). On the rainbow pattern (`MOVING=true`)
-//! the echo will show as smearing on rows 0 / 32, but that's
-//! orthogonal to the flicker measurement.
+//!   Core 1: wait for signal → fill pixels → pack → signal done
+//! ```
 //!
-//! ## Fill mode (compile-time flag)
+//! Communication via SIO FIFO (hardware mailbox between cores).
 //!
-//! Match `brightness_14`'s and `brightness_15`'s `MOVING` and
-//! `GREY_LEVEL` for a valid cross-architecture comparison.
+//! This file is also the **panel-recovery tool**: if you end up
+//! with the panel's driver chips in a desynchronised state,
+//! flashing this example restores a known-good sync via the W12-OE-
+//! on-scan_line-0 bootstrap.
 //!
-//! ## Architecture — verbatim from spwm_12 except:
+//! See `../reference/HUB75_DP3364S_RP2350_NOTES.md` for the full architecture.
 //!
-//!   - `fill_pixels` is the Thread A grey/rainbow toggle.
-//!   - DWT cycle-counter timing instrumentation replaces the
-//!     non-functional `timer_us`/FPS report.
-//!   - The `INTER_DMA_DELAY_CYCLES` / `INTER_DMA_INJECT` /
-//!     `INTER_DMA_HIGHZ_CYCLES` experiment toggles (all no-ops at
-//!     spwm_12's current baseline) are removed.
-//!
-//! Startup flush and sync phases are kept verbatim — bootstrapping
-//! the DP3364S on this panel is delicate.
+//! ## Run
 //!
 //! ```sh
-//! cargo run --release --example brightness_12
+//! cargo run --release --example spwm_2_unified_sm
 //! ```
 
 #![no_std]
@@ -64,34 +59,6 @@ use hal::pio::PIOExt;
 #[used]
 pub static IMAGE_DEF: hal::block::ImageDef = hal::block::ImageDef::secure_exe();
 
-// ── Thread A controls ────────────────────────────────────────────────
-/// `false` = solid grey flood (brightness probe).
-/// `true`  = diagonal rainbow scroll (flicker/echo probe).
-const MOVING: bool = false;
-/// Per-channel level for the solid-grey probe. Keep identical to the
-/// value in `brightness_14` / `brightness_15` for a valid comparison.
-const GREY_LEVEL: u8 = 128;
-
-// ── Timing instrumentation (DWT cycle counter) ──────────────────────
-const SYS_CLK_MHZ: u32 = 150;
-const DEMCR: u32     = 0xE000_EDFC;
-const DWT_CTRL: u32  = 0xE000_1000;
-const DWT_CYCCNT: u32 = 0xE000_1004;
-
-fn enable_cycle_counter() {
-    unsafe {
-        let demcr = (DEMCR as *const u32).read_volatile();
-        (DEMCR as *mut u32).write_volatile(demcr | (1 << 24)); // TRCENA
-        (DWT_CYCCNT as *mut u32).write_volatile(0);
-        let ctrl = (DWT_CTRL as *const u32).read_volatile();
-        (DWT_CTRL as *mut u32).write_volatile(ctrl | 1); // CYCCNTENA
-    }
-}
-
-fn now_cycles() -> u32 {
-    unsafe { (DWT_CYCCNT as *const u32).read_volatile() }
-}
-
 // ── HUB75 pin mapping (Interstate 75 W) ──────────────────────────────
 const R0: u32 = 1 << 0;
 const G0: u32 = 1 << 1;
@@ -105,9 +72,8 @@ const ALL_RGB: u32 = R0 | G0 | B0 | R1 | G1 | B1;
 const SCAN_LINES: usize = 32;
 
 // ── DP3264S / DP3364S configuration registers ────────────────────────
-// GROUP_SET (0x03) FIRST — see spwm_12 for rationale.
 const CONFIG_REGS: [u16; 13] = [
-    0x037F, 0x1100, 0x021F, 0x043F, 0x0504, 0x0642, 0x0700,
+    0x1100, 0x021F, 0x037F, 0x043F, 0x0504, 0x0642, 0x0700,
     0x08BF, 0x0960, 0x0ABE, 0x0B8B, 0x0C88, 0x0D12,
 ];
 
@@ -124,37 +90,20 @@ const WR_CFG_WORDS: usize = 32;
 const DATA_LATCH_PRE: u32 = 127; const DATA_LATCH_LAT: u32 = 1;
 const DATA_LATCH_WORDS: usize = 32;
 
-// ── Frame layout ────────────────────────────────────────────────────
-const VSYNC_OFFSET:   usize = 0;
-const PRE_ACT_OFFSET: usize = VSYNC_OFFSET + 1 + VSYNC_WORDS;     // 2
-const WR_CFG_OFFSET:  usize = PRE_ACT_OFFSET + 1 + PRE_ACT_WORDS; // 7
-const HEADER_WORDS:   usize = WR_CFG_OFFSET + 1 + WR_CFG_WORDS;   // 40
+const VSYNC_OFFSET:      usize = 0;
+const PRE_ACT_OFFSET:    usize = VSYNC_OFFSET + 1 + VSYNC_WORDS;      // 2
+const WR_CFG_OFFSET:     usize = PRE_ACT_OFFSET + 1 + PRE_ACT_WORDS;  // 7
+const DATA_LATCH_OFFSET: usize = WR_CFG_OFFSET + 1 + WR_CFG_WORDS;    // 40
 
-const DATA_LATCH_STRIDE: usize = 1 + DATA_LATCH_WORDS;            // 33
-const LATCHES_PER_LINE:  usize = 16;
-const LATCHES_PER_FRAME: usize = SCAN_LINES * LATCHES_PER_LINE;   // 512
+const LATCHES_PER_FRAME: usize = SCAN_LINES * 16; // 512
+const DATA_LATCH_STRIDE: usize = 1 + DATA_LATCH_WORDS; // 33
 
-const DATA_OFFSET: usize = HEADER_WORDS;                          // 40
-const DATA_END:    usize = DATA_OFFSET + LATCHES_PER_FRAME * DATA_LATCH_STRIDE; // 16 936
-
-/// Cycles of full-frame scan after each data load. 50 is spwm_12's
-/// baseline — yields ~65 Hz display refresh with the current data
-/// phase duration.
-const POST_SCAN_CYCLES: usize = 50;
-
-const SCAN_OFFSET: usize = DATA_END;
-const POST_SCAN_WORDS: usize = POST_SCAN_CYCLES * SCAN_LINES;
-
-const FRAME_WORDS: usize = SCAN_OFFSET + POST_SCAN_WORDS; // 18 536
+const FRAME_WORDS: usize =
+    DATA_LATCH_OFFSET + LATCHES_PER_FRAME * DATA_LATCH_STRIDE; // 16 936
 
 // ── Double-buffered frame data ───────────────────────────────────────
 static mut FRAME_BUF_A: [u32; FRAME_WORDS] = [0u32; FRAME_WORDS];
 static mut FRAME_BUF_B: [u32; FRAME_WORDS] = [0u32; FRAME_WORDS];
-
-// ── Scan buffer for ring-mode DMA (sync-phase only) ──────────────────
-#[repr(C, align(128))]
-struct ScanBufAligned([u32; SCAN_LINES]);
-static mut SCAN_BUF: ScanBufAligned = ScanBufAligned([0u32; SCAN_LINES]);
 
 // ── Core 1 stack ─────────────────────────────────────────────────────
 static mut CORE1_STACK: hal::multicore::Stack<4096> = hal::multicore::Stack::new();
@@ -164,6 +113,11 @@ const DISPLAY_CLK: u32 = 100;
 const SETUP_CLK: u32 = 28;
 const OE_CLK_W4: u32 = 4;
 const OE_CLK_W12: u32 = 12;
+
+// ── Scan buffer: 128-byte aligned for DMA ring mode ──────────────────
+#[repr(C, align(128))]
+struct ScanBufAligned([u32; SCAN_LINES]);
+static mut SCAN_BUF: ScanBufAligned = ScanBufAligned([0u32; SCAN_LINES]);
 
 // ── Pixel type and framebuffer ───────────────────────────────────────
 
@@ -177,6 +131,7 @@ impl Rgb {
 static mut PIXELS: [[Rgb; 128]; 64] = [[Rgb::BLACK; 128]; 64];
 
 // ── Gamma LUT: 8-bit -> 14-bit greyscale ─────────────────────────────
+
 static GAMMA14: [u16; 256] = {
     let mut lut = [0u16; 256];
     let mut i = 0;
@@ -189,6 +144,7 @@ static GAMMA14: [u16; 256] = {
 };
 
 // ── HSV helper ───────────────────────────────────────────────────────
+
 fn hsv(hue: u8) -> Rgb {
     let h = hue as u16;
     let region = h / 43;
@@ -212,27 +168,22 @@ const fn data_header(n_pre: u32, n_lat: u32) -> u32 {
 // ── Scan word with type bit ─────────────────────────────────────────
 
 fn scan_word(display: u32, addr: u32, setup: u32, oe: u32) -> u32 {
-    1
-    | ((display - 1) << 1)
-    | (addr << 14)
-    | ((setup - 1) << 19)
-    | ((oe - 1) << 24)
+    1                           // bit 0 = 1 (scan type)
+    | ((display - 1) << 1)     // bits 7:1
+    // bits 13:8: 0 (RGB zeros)
+    | (addr << 14)             // bits 18:14 → GPIO 6-10
+    | ((setup - 1) << 19)      // bits 23:19
+    | ((oe - 1) << 24)         // bits 27:24
 }
 
-fn scan_word_for_sync(scan_line: usize) -> u32 {
-    let oe = if scan_line == 0 { OE_CLK_W12 } else { OE_CLK_W4 };
-    scan_word(DISPLAY_CLK, scan_line as u32, SETUP_CLK, oe)
-}
+// ── Scan buffer builder ─────────────────────────────────────────────
 
-// ── Offset helpers ──────────────────────────────────────────────────
-
-const fn latch_header_offset(scan_line: usize, channel: usize) -> usize {
-    let latch_idx = scan_line * LATCHES_PER_LINE + channel;
-    DATA_OFFSET + latch_idx * DATA_LATCH_STRIDE
-}
-
-const fn post_scan_offset(cycle: usize, scan_line: usize) -> usize {
-    SCAN_OFFSET + cycle * SCAN_LINES + scan_line
+fn build_scan_buf() {
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(SCAN_BUF) };
+    for row in 0..SCAN_LINES {
+        let oe = if row == 0 { OE_CLK_W12 } else { OE_CLK_W4 };
+        buf.0[row] = scan_word(DISPLAY_CLK, row as u32, SETUP_CLK, oe);
+    }
 }
 
 // ── Frame-buffer packing ─────────────────────────────────────────────
@@ -251,46 +202,35 @@ fn pack_shift128(out: &mut [u32], word: u16, color_mask: u32) {
     }
 }
 
+/// Write the static command headers (VSYNC, PRE_ACT, WR_CFG) into
+/// the given frame buffer. Called once at startup for each buffer;
+/// DATA_LATCH headers are written by `pack_pixels()`.
 fn init_frame_headers(buf: &mut [u32; FRAME_WORDS]) {
     buf[VSYNC_OFFSET] = data_header(VSYNC_PRE, VSYNC_LAT);
     buf[VSYNC_OFFSET + 1] = 0;
-
     buf[PRE_ACT_OFFSET] = data_header(PRE_ACT_PRE, PRE_ACT_LAT);
     for i in 0..PRE_ACT_WORDS {
         buf[PRE_ACT_OFFSET + 1 + i] = 0;
     }
-
     buf[WR_CFG_OFFSET] = data_header(WR_CFG_PRE, WR_CFG_LAT);
-
-    for scan_line in 0..SCAN_LINES {
-        for channel in 0..LATCHES_PER_LINE {
-            buf[latch_header_offset(scan_line, channel)] =
-                data_header(DATA_LATCH_PRE, DATA_LATCH_LAT);
-        }
-    }
-
-    for cycle in 0..POST_SCAN_CYCLES {
-        for slot in 0..SCAN_LINES {
-            let oe = if slot == 0 { OE_CLK_W12 } else { OE_CLK_W4 };
-            buf[post_scan_offset(cycle, slot)] =
-                scan_word(DISPLAY_CLK, slot as u32, SETUP_CLK, oe);
-        }
+    for l in 0..LATCHES_PER_FRAME {
+        buf[DATA_LATCH_OFFSET + l * DATA_LATCH_STRIDE] =
+            data_header(DATA_LATCH_PRE, DATA_LATCH_LAT);
     }
 }
 
-const PACK_SHIFT: isize = 0;
-
+/// Pack the PIXELS framebuffer into the given frame buffer's
+/// DATA_LATCH regions.
 fn pack_pixels(buf: &mut [u32; FRAME_WORDS]) {
     let pixels = unsafe { &*core::ptr::addr_of!(PIXELS) };
 
     for scan_line in 0..SCAN_LINES {
-        let source_line =
-            (scan_line as isize + PACK_SHIFT).rem_euclid(SCAN_LINES as isize) as usize;
-        let upper_row = source_line;
-        let lower_row = source_line + 32;
+        let upper_row = scan_line;
+        let lower_row = scan_line + 32;
 
-        for channel in 0..LATCHES_PER_LINE {
-            let base = latch_header_offset(scan_line, channel) + 1;
+        for channel in 0..16usize {
+            let latch_idx = scan_line * 16 + channel;
+            let base = DATA_LATCH_OFFSET + latch_idx * DATA_LATCH_STRIDE + 1;
             let output = 15 - channel;
 
             let mut ur = [0u16; 8];
@@ -339,18 +279,15 @@ fn update_wr_cfg(buf: &mut [u32; FRAME_WORDS], reg_idx: usize) {
     );
 }
 
-// ── Fill pixels — Thread A probe ────────────────────────────────────
+// ── Fill pixels helper ──────────────────────────────────────────────
 
 fn fill_pixels(offset: u8) {
     let pixels = unsafe { &mut *core::ptr::addr_of_mut!(PIXELS) };
     for row in 0..64usize {
         for col in 0..128usize {
-            pixels[row][col] = if MOVING {
-                let hue = (row as u16 + col as u16 + offset as u16) as u8;
-                hsv(hue)
-            } else {
-                Rgb::new(GREY_LEVEL, GREY_LEVEL, GREY_LEVEL)
-            };
+            let hue = (col as u32 * 255 / 127) as u8;
+            let row_shift = (row as u32 * 255 / 63) as u8;
+            pixels[row][col] = hsv(hue.wrapping_add(offset).wrapping_add(row_shift));
         }
     }
 }
@@ -381,7 +318,7 @@ fn fifo_read() -> u32 {
             if (0xD000_0050 as *const u32).read_volatile() & 1 != 0 {
                 return (0xD000_0058 as *const u32).read_volatile();
             }
-            cortex_m::asm::wfe();
+            cortex_m::asm::wfe(); // sleep until event
         }
     }
 }
@@ -402,26 +339,18 @@ fn core1_task() {
 
         fill_pixels(offset);
         pack_pixels(buf);
+        update_wr_cfg(buf, (offset as usize / 2) % 13);
+
         fifo_write(1);
     }
 }
 
-// ── PIO helpers ─────────────────────────────────────────────────────
+// ── PIO + DMA helpers ───────────────────────────────────────────────
 
 const PIO0_BASE: u32 = 0x5020_0000;
-const PIO0_CTRL_SET: u32 = PIO0_BASE + 0x2000;
-const PIO0_CTRL_CLR: u32 = PIO0_BASE + 0x3000;
 const PIO0_FDEBUG: u32 = PIO0_BASE + 0x008;
 const SM0_CLKDIV: u32 = PIO0_BASE + 0x0C8;
-const SM0_EN: u32 = 1 << 0;
 const SM0_TXSTALL: u32 = 1 << 24;
-
-fn enable_sm(mask: u32) {
-    unsafe { (PIO0_CTRL_SET as *mut u32).write_volatile(mask) };
-}
-fn disable_sm(mask: u32) {
-    unsafe { (PIO0_CTRL_CLR as *mut u32).write_volatile(mask) };
-}
 
 fn set_clkdiv(int_div: u32) {
     unsafe { (SM0_CLKDIV as *mut u32).write_volatile(int_div << 16) };
@@ -436,46 +365,65 @@ fn wait_txstall(sm_stall_bit: u32) {
     }
 }
 
-// ── DMA ring-mode scan (ch1, raw register access, sync-phase only) ──
+// ── DMA ring-mode scan (ch1, raw register access) ───────────────────
+
 const DMA_BASE: u32 = 0x5000_0000;
+
+// CH1 registers (offset 0x40 per channel)
 const CH1_READ_ADDR:  *mut u32 = (DMA_BASE + 0x040) as *mut u32;
 const CH1_WRITE_ADDR: *mut u32 = (DMA_BASE + 0x044) as *mut u32;
+const CH1_TRANS_COUNT: *mut u32 = (DMA_BASE + 0x048) as *mut u32;
+const CH1_CTRL_TRIG:  *mut u32 = (DMA_BASE + 0x04C) as *mut u32;
+// AL1 alias — writing TRANS_COUNT_TRIG triggers the channel
 const CH1_AL1_CTRL:   *mut u32 = (DMA_BASE + 0x050) as *mut u32;
 const CH1_AL1_TRANS_COUNT_TRIG: *mut u32 = (DMA_BASE + 0x05C) as *mut u32;
+
+// PIO0 TX FIFO for SM0
 const PIO0_TXF0: u32 = PIO0_BASE + 0x010;
 
+/// Build the CH1 CTRL value for ring-mode scan DMA.
+///
+/// RP2350 DMA CTRL_TRIG register layout (differs from RP2040!):
+/// - EN[0]              = 1  (enable)
+/// - DATA_SIZE[3:2]     = 2  (32-bit transfers)
+/// - INCR_READ[4]       = 1  (increment read through scan buffer)
+/// - INCR_READ_REV[5]   = 0
+/// - INCR_WRITE[6]      = 0  (fixed write to FIFO)
+/// - INCR_WRITE_REV[7]  = 0
+/// - RING_SIZE[11:8]    = 7  (wrap every 2^7 = 128 bytes)
+/// - RING_SEL[12]       = 0  (ring applies to read address)
+/// - CHAIN_TO[16:13]    = 1  (chain to self = no-op)
+/// - TREQ_SEL[22:17]    = 0  (DREQ = PIO0_TX0)
 const CH1_CTRL_VAL: u32 =
-    (1 << 0)
-    | (2 << 2)
-    | (1 << 4)
-    | (7 << 8)
-    | (1 << 13)
-    | (0 << 17);
+    (1 << 0)        // EN
+    | (2 << 2)      // DATA_SIZE = 32-bit
+    | (1 << 4)      // INCR_READ
+    | (7 << 8)      // RING_SIZE = 7
+    | (1 << 13)     // CHAIN_TO = 1 (self)
+    | (0 << 17);    // TREQ_SEL = PIO0_TX0
 
+/// Start ring-mode scan DMA on ch1. Runs forever (or until stopped).
 fn start_ring_scan() {
     let scan_addr = core::ptr::addr_of!(SCAN_BUF) as u32;
     unsafe {
+        // Configure CTRL via AL1 (no trigger)
         CH1_AL1_CTRL.write_volatile(CH1_CTRL_VAL);
         CH1_READ_ADDR.write_volatile(scan_addr);
         CH1_WRITE_ADDR.write_volatile(PIO0_TXF0);
+        // Trigger via AL1_TRANS_COUNT_TRIG
         CH1_AL1_TRANS_COUNT_TRIG.write_volatile((15 << 28) | 32);
     }
 }
 
+/// Stop ring-mode scan DMA on ch1.
 fn stop_ring_scan() {
     unsafe {
+        // Must use CHAN_ABORT — clearing EN only pauses (BUSY stays high)
         const CHAN_ABORT: *mut u32 = (DMA_BASE + 0x464) as *mut u32;
         CHAN_ABORT.write_volatile(1 << 1);
         while CHAN_ABORT.read_volatile() & (1 << 1) != 0 {
             cortex_m::asm::nop();
         }
-    }
-}
-
-fn build_scan_buf() {
-    let buf = unsafe { &mut *core::ptr::addr_of_mut!(SCAN_BUF) };
-    for row in 0..SCAN_LINES {
-        buf.0[row] = scan_word_for_sync(row);
     }
 }
 
@@ -490,8 +438,6 @@ fn main() -> ! {
         12_000_000, pac.XOSC, pac.CLOCKS, pac.PLL_SYS, pac.PLL_USB,
         &mut pac.RESETS, &mut watchdog,
     ).unwrap();
-
-    enable_cycle_counter();
 
     // ── 2. Pins ──────────────────────────────────────────────────────
     let mut sio_hal = hal::Sio::new(pac.SIO);
@@ -517,6 +463,7 @@ fn main() -> ! {
         unsafe { (addr as *mut u32).write_volatile(6) };
     }
 
+    // Pull-down on LAT (GPIO 12) for safety during startup
     const PADS_BANK0: u32 = 0x4003_8000;
     const GPIO12_PAD: u32 = PADS_BANK0 + 0x04 + 12 * 4;
     unsafe {
@@ -524,12 +471,16 @@ fn main() -> ! {
         (GPIO12_PAD as *mut u32).write_volatile(val | (1 << 2));
     }
 
-    // ── 3. Install unified PIO program (from spwm_12) ────────────────
+    // ── 3. Pre-build the scan buffer ─────────────────────────────────
+    build_scan_buf();
+
+    // ── 4. Install unified PIO program ───────────────────────────────
     let (mut pio0, sm0, _, _, _) = pac.PIO0.split(&mut pac.RESETS);
 
     let ss = pio::SideSet::new(false, 2, false);
     let mut a = pio::Assembler::new_with_side_set(ss);
 
+    // Labels
     let mut dispatch    = a.label();
     let mut data_cmd    = a.label();
     let mut display_lp  = a.label();
@@ -539,10 +490,12 @@ fn main() -> ! {
     let mut lat_loop    = a.label();
     let mut wrap_source = a.label();
 
+    // ── DISPATCH (wrap_target) ───────────────────────────────────
     a.bind(&mut dispatch);
     a.out_with_side_set(pio::OutDestination::X, 1, 0b00);
     a.jmp_with_side_set(pio::JmpCondition::XIsZero, &mut data_cmd, 0b00);
 
+    // ── SCAN (type=1) ────────────────────────────────────────────
     a.out_with_side_set(pio::OutDestination::Y, 7, 0b00);
     a.bind(&mut display_lp);
     a.mov_with_side_set(
@@ -587,6 +540,7 @@ fn main() -> ! {
     a.out_with_side_set(pio::OutDestination::NULL, 4, 0b00);
     a.jmp_with_side_set(pio::JmpCondition::Always, &mut dispatch, 0b00);
 
+    // ── DATA (type=0) ────────────────────────────────────────────
     a.bind(&mut data_cmd);
     a.out_with_side_set(pio::OutDestination::X, 15, 0b00);
     a.out_with_side_set(pio::OutDestination::Y, 16, 0b00);
@@ -605,16 +559,17 @@ fn main() -> ! {
     let prog = a.assemble_with_wrap(wrap_source, dispatch);
     let installed = pio0.install(&prog).unwrap();
 
+    // ── SM0 setup: unified data+scan ─────────────────────────────
     let (mut sm, _, tx) =
         hal::pio::PIOBuilder::from_installed_program(installed)
             .buffers(hal::pio::Buffers::OnlyTx)
-            .out_pins(0, 11)
-            .set_pins(13, 1)
-            .side_set_pin_base(11)
+            .out_pins(0, 11)         // GPIO 0-10: RGB + ADDR
+            .set_pins(13, 1)         // GPIO 13: OE
+            .side_set_pin_base(11)   // GPIO 11: CLK, GPIO 12: LAT
             .out_shift_direction(hal::pio::ShiftDirection::Right)
             .autopull(true)
             .pull_threshold(32)
-            .clock_divisor_fixed_point(3, 0)
+            .clock_divisor_fixed_point(2, 0)
             .build(sm0);
 
     sm.set_pindirs([
@@ -629,198 +584,134 @@ fn main() -> ! {
     let _sm = sm.start();
     let mut tx = tx;
 
-    // ── 4. DMA — single channel ────────────────────────────────────
+    // ── 5. DMA — ch0 for data (HAL), ch1 for ring scan (raw) ────
     let dma = pac.DMA.split(&mut pac.RESETS);
     let mut ch = dma.ch0;
+    // ch1 is used via raw registers only — don't bind it to HAL
+    let _ch1 = dma.ch1;
 
-    defmt::info!(
-        "brightness_12 (split-DMA, unified) — MOVING={=bool} GREY_LEVEL={=u8}",
-        MOVING, GREY_LEVEL,
-    );
+    defmt::info!("DP3364S S-PWM (ring-mode DMA scan) starting");
 
-    // ── 5. Init frame headers ──────────────────────────────────────
+    // ── 6. Init frame headers + initial pixel fill ───────────────
     init_frame_headers(unsafe { &mut *core::ptr::addr_of_mut!(FRAME_BUF_A) });
     init_frame_headers(unsafe { &mut *core::ptr::addr_of_mut!(FRAME_BUF_B) });
 
-    // ── 6. Startup flush (verbatim from spwm_12) ────────────────────
-    const FLUSH_FRAMES: u32 = 26;
-    for flush in 0..FLUSH_FRAMES {
-        if (flush as usize) < CONFIG_REGS.len() {
-            update_wr_cfg(
-                unsafe { &mut *core::ptr::addr_of_mut!(FRAME_BUF_A) },
-                flush as usize,
-            );
-        }
-
-        set_clkdiv(2);
-        let data_slice = unsafe {
-            core::slice::from_raw_parts(
-                core::ptr::addr_of!(FRAME_BUF_A) as *const u32,
-                DATA_END,
-            )
-        };
-        let cfg = single_buffer::Config::new(ch, data_slice, tx);
-        let xfer = cfg.start();
-        let (new_ch, _, new_tx) = xfer.wait();
-        ch = new_ch;
-        tx = new_tx;
-        wait_txstall(SM0_TXSTALL);
-
-        set_clkdiv(3);
-        let scan_slice = unsafe {
-            let base = (core::ptr::addr_of!(FRAME_BUF_A) as *const u32).add(SCAN_OFFSET);
-            core::slice::from_raw_parts(base, SCAN_LINES)
-        };
-        let scan_cfg = single_buffer::Config::new(ch, scan_slice, tx);
-        let scan_xfer = scan_cfg.start();
-        let (new_ch2, _, new_tx2) = scan_xfer.wait();
-        ch = new_ch2;
-        tx = new_tx2;
-        wait_txstall(SM0_TXSTALL);
-    }
-
-    defmt::info!("flush complete");
-
-    // ── 6b. Sync phase (verbatim from spwm_12) ──────────────────────
-    build_scan_buf();
-    let _ch1 = dma.ch1;
-
-    set_clkdiv(3);
-    start_ring_scan();
-
-    const SYNC_FRAMES: u32 = 60;
-    for _ in 0..SYNC_FRAMES {
-        cortex_m::asm::delay(150_000 * 10);
-
-        stop_ring_scan();
-        wait_txstall(SM0_TXSTALL);
-
-        set_clkdiv(2);
-        let data_slice = unsafe {
-            core::slice::from_raw_parts(
-                core::ptr::addr_of!(FRAME_BUF_A) as *const u32,
-                DATA_END,
-            )
-        };
-        let cfg = single_buffer::Config::new(ch, data_slice, tx);
-        let xfer = cfg.start();
-        let (new_ch, _, new_tx) = xfer.wait();
-        ch = new_ch;
-        tx = new_tx;
-        wait_txstall(SM0_TXSTALL);
-        set_clkdiv(3);
-
-        start_ring_scan();
-    }
-
-    stop_ring_scan();
-    wait_txstall(SM0_TXSTALL);
-    defmt::info!("sync phase complete");
-
-    // Seed FRAME_BUF_B's WR_CFG payload to match A's last value.
-    update_wr_cfg(
-        unsafe { &mut *core::ptr::addr_of_mut!(FRAME_BUF_B) },
-        CONFIG_REGS.len() - 1,
-    );
-
-    // ── 7. Pack first real frame and spawn core 1 ───────────────────
     fill_pixels(0);
     pack_pixels(unsafe { &mut *core::ptr::addr_of_mut!(FRAME_BUF_A) });
 
+    // ── 7. Spawn core 1 ──────────────────────────────────────────
     let mut mc = hal::multicore::Multicore::new(
         &mut pac.PSM, &mut pac.PPB, &mut sio_hal.fifo,
     );
     let cores = mc.cores();
     cores[1].spawn(unsafe { CORE1_STACK.take().unwrap() }, core1_task).unwrap();
 
-    let mut active_buf: u8 = 0;
-    let mut core1_buf: u8 = 1;
-    let mut offset: u8 = 0;
-
-    offset = offset.wrapping_add(2);
-    fifo_write(offset as u32 | ((core1_buf as u32) << 8));
-
-    // Timing accumulators (cycles).
-    let mut scan_cy_total: u64 = 0;
-    let mut data_cy_total: u64 = 0;
-    let mut scan_count: u32 = 0;
-    let mut data_count: u32 = 0;
-    let mut last_report = now_cycles();
-
-    // Split-DMA main loop. Each iteration:
-    //   DMA 1: header + DATA_LATCHes  (~2.7 ms dark)
-    //   DMA 2: POST_SCAN_CYCLES × 32 scan words  (~12.6 ms bright)
-    loop {
-        let buf_ptr = if active_buf == 0 {
-            core::ptr::addr_of!(FRAME_BUF_A) as *const u32
-        } else {
-            core::ptr::addr_of!(FRAME_BUF_B) as *const u32
-        };
-
-        // DMA 1: data phase.
-        let t_data0 = now_cycles();
-        set_clkdiv(2);
-        enable_sm(SM0_EN);
-        let data_slice = unsafe { core::slice::from_raw_parts(buf_ptr, DATA_END) };
-        let cfg = single_buffer::Config::new(ch, data_slice, tx);
+    // ── 8. Startup flush using buffer A ──────────────────────────
+    for flush in 0..14u32 {
+        if (flush as usize) < CONFIG_REGS.len() {
+            update_wr_cfg(
+                unsafe { &mut *core::ptr::addr_of_mut!(FRAME_BUF_A) },
+                flush as usize,
+            );
+        }
+        let buf = unsafe { &*core::ptr::addr_of!(FRAME_BUF_A) };
+        let cfg = single_buffer::Config::new(ch, buf, tx);
         let xfer = cfg.start();
         let (new_ch, _, new_tx) = xfer.wait();
         ch = new_ch;
         tx = new_tx;
         wait_txstall(SM0_TXSTALL);
-        disable_sm(SM0_EN);
-        data_cy_total += now_cycles().wrapping_sub(t_data0) as u64;
-        data_count += 1;
 
-        // DMA 2: scan phase, POST_SCAN_CYCLES back-to-back 32-word DMAs.
+        // Scan one pass after each flush frame (HAL single_buffer)
+        let scan = unsafe { &*core::ptr::addr_of!(SCAN_BUF) };
+        let scan_cfg = single_buffer::Config::new(ch, &scan.0, tx);
+        let scan_xfer = scan_cfg.start();
+        let (new_ch2, _, new_tx2) = scan_xfer.wait();
+        ch = new_ch2;
+        tx = new_tx2;
+        wait_txstall(SM0_TXSTALL);
+    }
+    defmt::info!("flush complete");
+
+    let mut active_buf: u8 = 0;
+    let mut offset: u8 = 0;
+
+    const TIMER0_BASE: u32 = 0x400B_0000;
+    const TIMELR: *const u32 = (TIMER0_BASE + 0x0C) as *const u32;
+    fn timer_us() -> u32 {
+        unsafe { TIMELR.read_volatile() }
+    }
+    let mut frame_count: u32 = 0;
+    let mut last_report = timer_us();
+
+    // Kick off core 1 with the first pack job
+    offset = offset.wrapping_add(2);
+    let mut core1_buf: u8 = 1 - active_buf;
+    fifo_write(offset as u32 | ((core1_buf as u32) << 8));
+
+    // Initial data load
+    {
+        let buf = if active_buf == 0 {
+            unsafe { &*core::ptr::addr_of!(FRAME_BUF_A) }
+        } else {
+            unsafe { &*core::ptr::addr_of!(FRAME_BUF_B) }
+        };
+        let data_cfg = single_buffer::Config::new(ch, buf, tx);
+        let data_xfer = data_cfg.start();
+        let (new_ch, _, new_tx) = data_xfer.wait();
+        ch = new_ch;
+        tx = new_tx;
+        wait_txstall(SM0_TXSTALL);
+    }
+
+    set_clkdiv(3);
+
+    // Start continuous ring-mode scan
+    start_ring_scan();
+
+    loop {
+        // Wait for core 1 to finish packing
+        loop {
+            if fifo_try_read().is_some() { break }
+            cortex_m::asm::wfe();
+        }
+
+        frame_count += 1;
+
+        // Stop scan, load new frame, restart scan
+        stop_ring_scan();
+        wait_txstall(SM0_TXSTALL);
+
+        set_clkdiv(2);
+        active_buf = core1_buf;
+        let buf = if active_buf == 0 {
+            unsafe { &*core::ptr::addr_of!(FRAME_BUF_A) }
+        } else {
+            unsafe { &*core::ptr::addr_of!(FRAME_BUF_B) }
+        };
+        let data_cfg = single_buffer::Config::new(ch, buf, tx);
+        let data_xfer = data_cfg.start();
+        let (new_ch, _, new_tx) = data_xfer.wait();
+        ch = new_ch;
+        tx = new_tx;
+        wait_txstall(SM0_TXSTALL);
         set_clkdiv(3);
-        enable_sm(SM0_EN);
-        for cycle in 0..POST_SCAN_CYCLES {
-            let t_scan0 = now_cycles();
-            let scan_slice = unsafe {
-                core::slice::from_raw_parts(
-                    buf_ptr.add(SCAN_OFFSET + cycle * SCAN_LINES),
-                    SCAN_LINES,
-                )
-            };
-            let cfg = single_buffer::Config::new(ch, scan_slice, tx);
-            let xfer = cfg.start();
-            let (new_ch, _, new_tx) = xfer.wait();
-            ch = new_ch;
-            tx = new_tx;
-            wait_txstall(SM0_TXSTALL);
-            scan_cy_total += now_cycles().wrapping_sub(t_scan0) as u64;
-            scan_count += 1;
-        }
-        disable_sm(SM0_EN);
 
-        if fifo_try_read().is_some() {
-            active_buf = core1_buf;
-            core1_buf = 1 - active_buf;
-            offset = offset.wrapping_add(2);
-            fifo_write(offset as u32 | ((core1_buf as u32) << 8));
-        }
+        // Restart continuous ring-mode scan
+        start_ring_scan();
 
-        let now = now_cycles();
-        if now.wrapping_sub(last_report) >= SYS_CLK_MHZ * 1_000_000 {
-            let scan_avg_us = if scan_count > 0 {
-                (scan_cy_total / (SYS_CLK_MHZ as u64 * scan_count as u64)) as u32
-            } else { 0 };
-            let data_avg_us = if data_count > 0 {
-                (data_cy_total / (SYS_CLK_MHZ as u64 * data_count as u64)) as u32
-            } else { 0 };
-            let total = scan_cy_total + data_cy_total;
-            let dark_permille = if total > 0 {
-                (data_cy_total * 1000 / total) as u32
-            } else { 0 };
-            defmt::info!(
-                "scan: {=u32}×{=u32}µs  data: {=u32}×{=u32}µs  dark: {=u32}‰",
-                scan_count, scan_avg_us, data_count, data_avg_us, dark_permille,
-            );
-            scan_cy_total = 0;
-            data_cy_total = 0;
-            scan_count = 0;
-            data_count = 0;
+        // Kick off next pack job
+        offset = offset.wrapping_add(2);
+        core1_buf = 1 - active_buf;
+        fifo_write(offset as u32 | ((core1_buf as u32) << 8));
+
+        if frame_count & 0xFF == 0 {
+            let now = timer_us();
+            let elapsed_us = now.wrapping_sub(last_report);
+            if elapsed_us > 0 {
+                let fps_x10 = 2_560_000_000u32 / elapsed_us;
+                defmt::info!("FPS: {}.{}", fps_x10 / 10, fps_x10 % 10);
+            }
             last_report = now;
         }
     }

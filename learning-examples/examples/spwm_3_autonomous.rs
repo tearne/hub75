@@ -64,12 +64,12 @@
 //!   diagonal rainbow via `fill_pixels_rainbow(offset)`.
 //!
 //! ```sh
-//! cargo run --release --example spwm_33_autonomous
+//! cargo run --release --example spwm_3_autonomous
 //! ```
 //!
 //! ## See also
 //!
-//! [`HUB75_DP3364S_RP2350_NOTES.md`](../HUB75_DP3364S_RP2350_NOTES.md)
+//! [`reference/HUB75_DP3364S_RP2350_NOTES.md`](../reference/HUB75_DP3364S_RP2350_NOTES.md)
 //! in this crate — distilled reference covering hardware facts, the
 //! wire protocol, RP2350 PIO gotchas, and the echo artifact. That
 //! document references this file by name in several places; if this
@@ -190,6 +190,11 @@ const WR_CFG_OFFSET:  usize = PRE_ACT_OFFSET + 1 + PRE_ACT_WORDS; // 7
 const HEADER_WORDS:   usize = WR_CFG_OFFSET + 1 + WR_CFG_WORDS;   // 40
 
 const DATA_LATCH_STRIDE: usize = 1 + DATA_LATCH_WORDS;                // 33
+// Fixed by chip geometry: each DP3364S chip has 16 column outputs,
+// and each DATA_LATCH command sends one column-per-chip. Over 16
+// latches we cover all 128 panel columns (8 chips × 16 cols). Not
+// tunable — `pack_pixels` indexes pixel columns via `15 - channel`
+// and assumes the result is in 0..=15.
 const LATCHES_PER_LINE:  usize = 16;
 const LATCHES_PER_FRAME: usize = SCAN_LINES * LATCHES_PER_LINE;       // 512
 
@@ -221,6 +226,10 @@ static mut CORE1_STACK: hal::multicore::Stack<4096> = hal::multicore::Stack::new
 // ── Scan parameters ──────────────────────────────────────────────────
 const DISPLAY_CLK: u32 = 100;
 const SETUP_CLK: u32 = 28;
+// OE pulse width in PIO cycles. scan_line 0 needs the wider W12 pulse
+// for SRAM-write-pointer alignment at boot; all other scan_lines use
+// W4. Attempting uniform W12 for every scan_line breaks the
+// upper/lower-half sync on the DP3364S.
 const OE_CLK_W4: u32 = 4;
 const OE_CLK_W12: u32 = 12;
 
@@ -236,13 +245,19 @@ impl Rgb {
 static mut PIXELS: [[Rgb; 128]; 64] = [[Rgb::BLACK; 128]; 64];
 
 // ── Gamma LUT: 8-bit -> 14-bit greyscale ─────────────────────────────
-
+//
+// Quadratic weighting. Linear and cubic alternatives were measured
+// against a gradient test pattern; neither improved dim-end step
+// visibility because gamma choice only redistributes the chip's 14-
+// bit PWM range, it doesn't add resolution. Smoother dim gradients
+// would need dithering in `pack_pixels` (spatial Bayer or temporal
+// frame-over-frame), which is a pack-algorithm change, not a gamma
+// one.
 static GAMMA14: [u16; 256] = {
     let mut lut = [0u16; 256];
     let mut i = 0;
     while i < 256 {
-        let v = (i as u32 * i as u32 * 0x3FFF) / (255 * 255);
-        lut[i] = v as u16;
+        lut[i] = ((i as u32 * i as u32 * 0x3FFF) / (255 * 255)) as u16;
         i += 1;
     }
     lut
@@ -295,11 +310,10 @@ fn scan_word(display: u32, addr: u32, setup: u32, oe: u32) -> u32 {
 
 /// Scan word populating [`SCAN_BUF`]. Gives scan-line 0 a wider OE
 /// pulse (W12) and every other scan-line the shorter W4 pulse.
-/// The W12 on line 0 is empirically what aligns the 8 driver chips'
-/// internal SRAM write pointers to a common offset during the ~1 s
-/// boot sync phase; keeping it in the main-loop scan is harmless
-/// (brightness on row 0 matches the rest of the panel because the
-/// chip displays line 0 only once per 32-line scan).
+/// The W12 on line 0 is what aligns the 8 driver chips' internal
+/// SRAM write pointers during the ~1 s boot sync phase. Applying W12
+/// to every scan_line breaks the upper/lower-half sync, so the two
+/// widths must stay split.
 fn scan_word_for_sync(scan_line: usize) -> u32 {
     let oe = if scan_line == 0 { OE_CLK_W12 } else { OE_CLK_W4 };
     scan_word(DISPLAY_CLK, scan_line as u32, SETUP_CLK, oe)
@@ -448,6 +462,27 @@ fn update_wr_cfg(buf: &mut [u32; FRAME_WORDS], reg_idx: usize) {
 /// core 1 has plenty of budget for non-trivial work.
 fn fill_pixels(offset: u8) {
     fill_pixels_rainbow(offset);
+}
+
+/// Diagnostic gradient pattern used during gamma / bit-depth
+/// investigations. Four 16-row horizontal bands — R, G, B, W — each
+/// stepping 0 → 255 across the 128 columns. Swap into `fill_pixels`
+/// to use.
+#[allow(dead_code)]
+fn fill_pixels_gradient() {
+    let pixels = unsafe { &mut *core::ptr::addr_of_mut!(PIXELS) };
+    for row in 0..64usize {
+        let band = row / 16;
+        for col in 0..128usize {
+            let v = (col * 255 / 127) as u8;
+            pixels[row][col] = match band {
+                0 => Rgb::new(v, 0, 0),
+                1 => Rgb::new(0, v, 0),
+                2 => Rgb::new(0, 0, v),
+                _ => Rgb::new(v, v, v),
+            };
+        }
+    }
 }
 
 /// Animated diagonal rainbow: `hue = (row + col + offset) mod 256`.
@@ -1227,6 +1262,7 @@ fn main() -> ! {
             let core1_busy_permille = if window_cy > 0 {
                 ((pack_cy_total as u64) * 1000 / window_cy) as u32
             } else { 0 };
+
             defmt::info!(
                 "cycles={=u32}  frame {=u32}µs (data {=u32}µs scan {=u32}µs dark {=u32}‰)  display {=u32}.{=u32} Hz  content {=u32}.{=u32} Hz  line {=u32} Hz  pack avg={=u32}µs max={=u32}µs core1_busy={=u32}‰  core1_waits {=u32}/{=u32}  core0_wfi {=u32}‰",
                 current_scan_cycles,

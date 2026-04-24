@@ -111,7 +111,7 @@
 //! ## Run
 //!
 //! ```sh
-//! cargo run --release --example spwm_2_pio_cpu
+//! cargo run --release --example spwm_1_pio_cpu
 //! ```
 
 #![no_std]

@@ -2,7 +2,7 @@
 
 *A distilled reference for anyone writing a driver for this specific combination of panel, column-driver chip, and microcontroller. Assembled from a month of experimentation; intended to save the next person days to weeks. Last updated 2026-04-24.*
 
-The working reference implementation is `learning-examples/examples/spwm_33_autonomous.rs`.
+The working reference implementation is `learning-examples/examples/spwm_3_autonomous.rs`.
 
 ---
 
@@ -148,7 +148,7 @@ Symmetric to trigger 1 but on the scan side: if RGB is held at 0 during every sc
 
 ### Why both fixes are necessary
 
-We independently discovered each trigger. A previous generation of the driver (`spwm_17`) avoided the echo by using two separately-installed PIO programs at different PC offsets; this was thought to be the mechanism but was actually coincidental with the PINCTRL configuration it implied. The unified-program driver in `spwm_33_autonomous.rs` explicitly applies both fixes; disabling either one brings back the artifact.
+We independently discovered each trigger. An earlier driver generation avoided the echo by using two separately-installed PIO programs at different PC offsets; this was originally thought to be the mechanism but was actually coincidental with the PINCTRL configuration that architecture implied. The unified-program driver in `spwm_3_autonomous.rs` explicitly applies both fixes; disabling either one brings back the artifact.
 
 ---
 
@@ -158,7 +158,7 @@ We independently discovered each trigger. A previous generation of the driver (`
 
 **Undocumented-by-name but load-bearing behaviour.** When `PINCTRL.OUT_COUNT = C` and the instruction is `out PINS, N` with `N < C`, the PIO writes N bits from OSR to pins `OUT_BASE..OUT_BASE+N-1` as expected, *and* zero-fills pins `OUT_BASE+N..OUT_BASE+C-1`. Those pins are forced to 0 every execution.
 
-**Diagnostic evidence:** `spwm_31_zerofill_probe.rs`. Drives pins 6..10 HIGH via SET PINDIRS, executes `out PINS, 6` at OUT_COUNT=6 then at OUT_COUNT=11, reads pins back via IN PINS. Pins 6..10 read `0b11111` in the first case and `0b00000` in the second. Accounting for the 2-cycle input-pin synchroniser delay (§5.4), the behaviour is unambiguous.
+**Diagnostic evidence:** a standalone PIO probe drove pins 6..10 HIGH via `SET PINDIRS`, executed `out PINS, 6` at `OUT_COUNT = 6` then at `OUT_COUNT = 11`, and read the pins back via `IN PINS`. Pins 6..10 read `0b11111` in the first case and `0b00000` in the second. Accounting for the 2-cycle input-pin synchroniser delay (§5.4), the behaviour is unambiguous.
 
 **Consequence:** if your OUT group is wider than your per-instruction bit count, the "extra" pins are actively driven to 0 on every OUT — they aren't left alone as one might assume. For the data phase on this panel, set OUT_COUNT = 6 (exactly the `out PINS, 6` width) so the ADDR pins 6..10 retain their scan-phase value. For the scan phase, set OUT_COUNT = 11 to match `out PINS, 11` (RGB + ADDR together).
 
@@ -168,7 +168,7 @@ We independently discovered each trigger. A previous generation of the driver (`
 
 In `pio-0.2.1`, `Assembler::bind(&mut label)` labels the *next* instruction slot (= `instructions.len()`, i.e. the position where the *next* `emit()` will go). So if you bind a label after the last instruction of a wrap region, `label_offset` is one past the last instruction. `assemble_with_wrap(source, target)` compensates internally with `source = label_offset(&source) - 1`, so the `Program`'s `wrap.source` field ends up equal to the PC of the last instruction in the wrap region (what EXECCTRL.WRAP_TOP wants).
 
-**Consequence:** if you manually compute EXECCTRL.WRAP_TOP at runtime (for phase-dependent wrap ranges, as this driver does), remember to subtract 1 from `bind`-labelled positions. This caught us for a full flash-compile cycle; the spwm_27 file (earlier PIO program) initially used the label values directly, which made the scan phase wrap to one PC beyond the program, landing on uninitialised PIO memory (garbage instructions) and hanging.
+**Consequence:** if you manually compute EXECCTRL.WRAP_TOP at runtime (for phase-dependent wrap ranges, as this driver does), remember to subtract 1 from `bind`-labelled positions. Using the raw label values directly makes the scan phase wrap to one PC beyond the program, landing on uninitialised PIO memory (garbage instructions) and hanging — it took a full flash-compile cycle to spot.
 
 Verified in `pio-0.2.1/src/lib.rs:574`.
 
@@ -182,7 +182,7 @@ The PIO's fractional clkdiv register supports 8.8 fixed-point division. In pract
 
 When PIO writes a pin via OUT/SET/side-set, the pin output register updates on the executing cycle, but the input-pin synchroniser (which feeds the PIO's IN instruction) takes ~2 cycles to reflect the new value. Consequence: `out PINS, ... ; in PINS, ...` back-to-back reads the pin state from *before* the OUT.
 
-This is fine for most use cases (the pins are driven output anyway, so you don't care what IN reads) but matters if you're writing a diagnostic like `spwm_31` that probes pin state from the same SM that wrote it. The simplest work-around: insert one dummy instruction between OUT and IN, or accept that the IN reads the state from the previous iteration (which is often what you want anyway).
+This is fine for most use cases (the pins are driven output anyway, so you don't care what IN reads) but matters if you're writing a diagnostic that probes pin state from the same SM that wrote it. The simplest work-around: insert one dummy instruction between OUT and IN, or accept that the IN reads the state from the previous iteration (which is often what you want anyway).
 
 ### 5.5 SM_INSTR register writes inject an instruction
 
@@ -296,7 +296,7 @@ Loops `(scan_line, channel, word, slot, colour)`, extracting one bit per iterati
    ```
 3. **ORed-by-colour.** Shift each colour's scattered nibble by the colour index (0..5) and OR into the output word. Six ORs per output word vs 24 shifts + 24 ORs for the naive pack.
 
-See `pack_pixels` in `spwm_33_autonomous.rs`.
+See `pack_pixels` in `spwm_3_autonomous.rs`.
 
 ### Gamma table
 
@@ -339,11 +339,13 @@ Worth knowing what *doesn't* work, so you can skip re-testing:
 6. **"Echo is about scan-line-31 → 0 transition electrically."** It's chip-internal; scan-line 0 reads its data from the same SRAM that line 31 polluted. The trigger (ADDR or RGB being 0) is what causes the pollution; the symptom (visual echo) is a consequence.
 7. **"The RP2350 PIO docs say what `out PINS, N` does when OUT_COUNT > N."** They don't, directly. `rp235x-hal`'s `out_pins` doc comment says "up to count pins" which is ambiguous. Treat OUT_COUNT as exactly the bit count you need, not a safety ceiling.
 8. **"Chip register 0x0E must do something useful — let's sweep."** We did. It doesn't.
+9. **"OE pulse width is a tunable brightness knob."** No — running uniform W12 across every scan-line breaks the upper/lower-half sync. The W12/W4 split (line 0 = W12, lines 1-31 = W4) is load-bearing; shorter pulses on line 0 fail to align the chip SRAM pointers, longer pulses on other lines desync the halves.
+10. **"`LATCHES_PER_LINE` is a PWM bit-plane count; increasing it gives smoother gradients."** No — it's chip geometry. Each DP3364S chip has 16 column outputs; `LATCHES_PER_LINE = 16` maps directly to that. Going higher overflows column indices in `pack_pixels`; going lower leaves columns undriven.
+11. **"Changing the gamma curve adds dim-end resolution."** No — gamma only redistributes the chip's 14-bit PWM range across the 256 input values; it doesn't add steps. Dim-end stepping is a fundamental 14-bit limit. Dithering in `pack_pixels` (spatial Bayer or temporal) would be the only way to fake more effective resolution.
 
 ---
 
 ## Companion files
 
-- `examples/spwm_33_autonomous.rs` — working reference implementation.
-- `ROADMAP.md` — forward plan (current as of the file being written).
+- `examples/spwm_3_autonomous.rs` — working reference implementation.
 - `reference/DP3364S/` — the DP3364S datasheet.
