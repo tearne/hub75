@@ -16,8 +16,37 @@
 use std::io::Write;
 use std::time::Duration;
 
+#[cfg(not(any(
+    feature = "panel-64x64",
+    feature = "panel-64x32",
+    feature = "panel-128x64",
+)))]
+compile_error!(
+    "Select a panel size: --features panel-64x64 (or panel-64x32 or panel-128x64)"
+);
+
+#[cfg(any(
+    all(feature = "panel-64x64", feature = "panel-64x32"),
+    all(feature = "panel-64x64", feature = "panel-128x64"),
+    all(feature = "panel-64x32", feature = "panel-128x64"),
+))]
+compile_error!("Only one panel size feature may be enabled");
+
+#[cfg(feature = "panel-64x64")]
 pub const WIDTH: usize = 64;
+#[cfg(feature = "panel-64x64")]
 pub const HEIGHT: usize = 64;
+
+#[cfg(feature = "panel-64x32")]
+pub const WIDTH: usize = 64;
+#[cfg(feature = "panel-64x32")]
+pub const HEIGHT: usize = 32;
+
+#[cfg(feature = "panel-128x64")]
+pub const WIDTH: usize = 128;
+#[cfg(feature = "panel-128x64")]
+pub const HEIGHT: usize = 64;
+
 pub const FRAME_MAGIC: &[u8; 4] = b"HB75";
 pub const FRAME_PIXEL_BYTES: usize = WIDTH * HEIGHT * 3;
 

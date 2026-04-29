@@ -9,8 +9,8 @@ Same pattern as crossfade_test.rs but driven from the host, so you
 can compare USB throughput vs on-device generation.
 
 Usage:
-    ./host/scanline_test.py
-    ./host/scanline_test.py /dev/ttyACM0
+    ./host/scanline_test.py --width 64 --height 32
+    ./host/scanline_test.py --width 64 --height 64 /dev/ttyACM0
 """
 
 import argparse
@@ -19,14 +19,14 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(__file__))
-from hub75_client import Hub75Client, WIDTH, HEIGHT, FRAME_PIXEL_BYTES
+from hub75_client import Hub75Client
 
 
-def make_hline(y, r, g, b):
-    buf = bytearray(FRAME_PIXEL_BYTES)
-    for row in range(HEIGHT):
-        for col in range(WIDTH):
-            off = (row * WIDTH + col) * 3
+def make_hline(y, r, g, b, width, height):
+    buf = bytearray(width * height * 3)
+    for row in range(height):
+        for col in range(width):
+            off = (row * width + col) * 3
             if row == y:
                 buf[off] = r
                 buf[off + 1] = g
@@ -38,11 +38,11 @@ def make_hline(y, r, g, b):
     return bytes(buf)
 
 
-def make_vline(x, r, g, b):
-    buf = bytearray(FRAME_PIXEL_BYTES)
-    for row in range(HEIGHT):
-        for col in range(WIDTH):
-            off = (row * WIDTH + col) * 3
+def make_vline(x, r, g, b, width, height):
+    buf = bytearray(width * height * 3)
+    for row in range(height):
+        for col in range(width):
+            off = (row * width + col) * 3
             if col == x:
                 buf[off] = r
                 buf[off + 1] = g
@@ -57,11 +57,13 @@ def make_vline(x, r, g, b):
 def main():
     parser = argparse.ArgumentParser(description="Scanning line test over USB")
     parser.add_argument("port", nargs="?", help="Serial port (auto-detected if omitted)")
+    parser.add_argument("--width", type=int, required=True, help="Panel width in pixels")
+    parser.add_argument("--height", type=int, required=True, help="Panel height in pixels")
     parser.add_argument("--fps", type=float, default=30, help="Target fps (default: 30)")
     args = parser.parse_args()
 
-    with Hub75Client(args.port) as client:
-        print(f"Connected. Sending scanning lines at {args.fps} fps target. Ctrl+C to stop.")
+    with Hub75Client(width=args.width, height=args.height, port=args.port) as client:
+        print(f"Connected to {client.width}×{client.height}. Sending scanning lines at {args.fps} fps target. Ctrl+C to stop.")
 
         interval = 1.0 / args.fps
         horizontal = True
@@ -72,15 +74,15 @@ def main():
         try:
             while True:
                 if horizontal:
-                    frame = make_hline(position, 255, 0, 0)
+                    frame = make_hline(position, 255, 0, 0, client.width, client.height)
                 else:
-                    frame = make_vline(position, 0, 128, 255)
+                    frame = make_vline(position, 0, 128, 255, client.width, client.height)
 
                 client.send_frame(frame)
                 sent += 1
 
                 position += 1
-                limit = HEIGHT if horizontal else WIDTH
+                limit = client.height if horizontal else client.width
                 if position >= limit:
                     position = 0
                     horizontal = not horizontal

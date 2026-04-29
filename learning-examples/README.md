@@ -1,20 +1,15 @@
 # learning-examples
 
-Self-contained bare-metal examples for the [Pimoroni Interstate 75 W](https://shop.pimoroni.com/products/interstate-75-w) (RP2350A) driving HUB75 LED matrix panels. Each example is a single file with everything inline — no shared libraries.
+Self-contained bare-metal examples driving HUB75 LED matrix panels on the [Pimoroni Interstate 75 W](https://shop.pimoroni.com/products/interstate-75-w) (RP2350A). Each example is a single file with everything inline — no shared libraries. Reads top-to-bottom as a progression from CPU bit-bang to fully-autonomous PIO + DMA.
 
-See the [root README](../README.md) for prerequisites and hardware setup.
+Setup and flashing: [`SETUP.md`](../SETUP.md), [`FLASHING.md`](../FLASHING.md).
 
-## Hardware
-
-- [Pimoroni Interstate 75 W](https://shop.pimoroni.com/products/interstate-75-w) (RP2350A version)
-- HUB75 LED matrix panel (see tested panels below)
-- Raspberry Pi Debug Probe (or any CMSIS-DAP SWD probe) for flashing
-
-## Run
-
-```bash
-cargo run --release --example <name>
+```sh
+cd learning-examples
+cargo run --release --example <name>            # with a probe
 ```
+
+For BOOTSEL + `picotool`, see [`FLASHING.md`](../FLASHING.md).
 
 ## Terminology
 

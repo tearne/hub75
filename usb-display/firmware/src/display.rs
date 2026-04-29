@@ -1,130 +1,54 @@
-//! HUB75 display types for DMA-driven autonomous scanning.
+//! USB frame protocol receiver for the host → firmware pixel stream.
 //!
-//! Contains pixel types, gamma correction, bitplane packing, the USB frame
-//! protocol receiver, and BCM timing generation.
+//! Pixel pack, gamma, and DMA setup all live in `hub75`. This module
+//! only owns the binary frame protocol that USB CDC carries.
 
+use hub75::Rgb;
+
+#[cfg(not(any(
+    feature = "panel-shift-64x64",
+    feature = "panel-shift-64x32",
+    feature = "panel-spwm-128x64",
+)))]
+compile_error!(
+    "Select a panel: --features panel-shift-64x64 (or panel-shift-64x32 or panel-spwm-128x64)"
+);
+
+#[cfg(any(
+    all(feature = "panel-shift-64x64", feature = "panel-shift-64x32"),
+    all(feature = "panel-shift-64x64", feature = "panel-spwm-128x64"),
+    all(feature = "panel-shift-64x32", feature = "panel-spwm-128x64"),
+))]
+compile_error!("Only one panel feature may be enabled");
+
+#[cfg(feature = "panel-shift-64x64")]
 pub const WIDTH: usize = 64;
+#[cfg(feature = "panel-shift-64x64")]
 pub const HEIGHT: usize = 64;
-pub const ROW_PAIRS: usize = HEIGHT / 2;
-pub const COLOR_DEPTH: usize = 8;
-pub const WORDS_PER_ROW: usize = WIDTH / 4;
 
-pub const OE: u32 = 1 << 13;
+#[cfg(feature = "panel-shift-64x32")]
+pub const WIDTH: usize = 64;
+#[cfg(feature = "panel-shift-64x32")]
+pub const HEIGHT: usize = 32;
 
-// ── Pixel type ──────────────────────────────────────────────────────
-
-#[derive(Copy, Clone, Default)]
-pub struct Rgb {
-    pub r: u8,
-    pub g: u8,
-    pub b: u8,
-}
-
-impl Rgb {
-    pub const fn new(r: u8, g: u8, b: u8) -> Self {
-        Self { r, g, b }
-    }
-
-    pub const BLACK: Rgb = Rgb::new(0, 0, 0);
-}
-
-// ── Gamma correction ────────────────────────────────────────────────
-
-static GAMMA_LUT: [u8; 256] = {
-    let mut lut = [0u8; 256];
-    let mut i = 0;
-    while i < 256 {
-        let isqrt = {
-            let mut x = i;
-            let mut y = (x + 1) / 2;
-            while y < x { x = y; y = (x + i / x) / 2; }
-            x
-        };
-        let v = (i * isqrt + 8) / 16;
-        lut[i] = if v > 255 { 255 } else { v as u8 };
-        i += 1;
-    }
-    lut
-};
-
-fn gamma(color: Rgb) -> Rgb {
-    Rgb::new(
-        GAMMA_LUT[color.r as usize],
-        GAMMA_LUT[color.g as usize],
-        GAMMA_LUT[color.b as usize],
-    )
-}
-
-// ── DMA buffer ──────────────────────────────────────────────────────
-
-const WORDS_PER_BITPLANE: usize = ROW_PAIRS * WORDS_PER_ROW;
-const PIXEL_DATA_WORDS: usize = COLOR_DEPTH * WORDS_PER_BITPLANE;
-
-pub const DMA_BUF_WORDS: usize = PIXEL_DATA_WORDS;
-pub const TIMING_BUF_WORDS: usize = COLOR_DEPTH * 2;
-
-/// Contiguous buffer for DMA-driven autonomous scanning.
-///
-/// Layout: `[bitplane 0: row0..row31] [bitplane 1: row0..row31] ... [bitplane 7]`
-///
-/// Packed bitplane data laid out contiguously so DMA can stream the entire
-/// buffer without CPU intervention.
-pub struct DmaBuffer {
-    pub pixels: [u32; DMA_BUF_WORDS],
-}
-
-impl DmaBuffer {
-    pub const fn new() -> Self {
-        Self { pixels: [0u32; DMA_BUF_WORDS] }
-    }
-
-    /// Pack RGB pixel data (with gamma correction) into the DMA buffer.
-    pub fn load_from_rgb(&mut self, src: &[[Rgb; WIDTH]; HEIGHT]) {
-        for bit in 0..COLOR_DEPTH {
-            for row in 0..ROW_PAIRS {
-                for word_idx in 0..WORDS_PER_ROW {
-                    let mut word: u32 = 0;
-                    for pix in 0..4 {
-                        let col = word_idx * 4 + pix;
-                        let upper = gamma(src[row][col]);
-                        let lower = gamma(src[row + ROW_PAIRS][col]);
-
-                        let r0 = ((upper.r >> bit) & 1) as u32;
-                        let g0 = ((upper.g >> bit) & 1) as u32;
-                        let b0 = ((upper.b >> bit) & 1) as u32;
-                        let r1 = ((lower.r >> bit) & 1) as u32;
-                        let g1 = ((lower.g >> bit) & 1) as u32;
-                        let b1 = ((lower.b >> bit) & 1) as u32;
-
-                        let pixel_data = r0 | (g0 << 1) | (b0 << 2)
-                            | (r1 << 3) | (g1 << 4) | (b1 << 5);
-                        word |= pixel_data << (pix * 8);
-                    }
-                    let idx = bit * WORDS_PER_BITPLANE + row * WORDS_PER_ROW + word_idx;
-                    self.pixels[idx] = word;
-                }
-            }
-        }
-    }
-
-    pub fn as_ptr(&self) -> *const u32 {
-        self.pixels.as_ptr()
-    }
-}
-
-// ── USB frame protocol ──────────────────────────────────────────────
+#[cfg(feature = "panel-spwm-128x64")]
+pub const WIDTH: usize = 128;
+#[cfg(feature = "panel-spwm-128x64")]
+pub const HEIGHT: usize = 64;
 
 const FRAME_MAGIC: [u8; 4] = *b"HB75";
 const FRAME_PIXEL_BYTES: usize = WIDTH * HEIGHT * 3;
 
-/// Pixel receive buffer. FrameReceiver writes incoming USB data here.
+/// Pixel receive buffer. `FrameReceiver` writes incoming USB data here.
 pub struct ReceiveBuffer {
     pub pixels: [[Rgb; WIDTH]; HEIGHT],
 }
 
 impl ReceiveBuffer {
     pub const fn new() -> Self {
-        Self { pixels: [[Rgb::BLACK; WIDTH]; HEIGHT] }
+        Self {
+            pixels: [[Rgb::BLACK; WIDTH]; HEIGHT],
+        }
     }
 }
 
@@ -177,10 +101,12 @@ impl FrameReceiver {
                         let dropped = b.wrapping_sub(self.expected_seq);
                         self.dropped_total = self.dropped_total.saturating_add(dropped as u32);
                         self.drop_events += 1;
-                        if self.drop_events.count_ones() == 1 { // log at 1, 2, 4, 8, 16...
+                        if self.drop_events.count_ones() == 1 {
                             defmt::warn!(
                                 "dropped {} frames ({} total in {} events)",
-                                dropped, self.dropped_total, self.drop_events
+                                dropped,
+                                self.dropped_total,
+                                self.drop_events
                             );
                         }
                     }
@@ -215,43 +141,4 @@ impl FrameReceiver {
 
         got_frame
     }
-}
-
-// ── BCM timing ──────────────────────────────────────────────────────
-
-/// Generate BCM timing values for the Address SM.
-///
-/// Returns [off, on, off, on, ...] cycle counts, two per bitplane.
-/// `base_cycles` is the display time for bit 0; each subsequent bit doubles.
-/// `brightness` is 0–255 (255 = full brightness).
-pub fn generate_timing_buffer(base_cycles: u32, brightness: u8) -> [u32; TIMING_BUF_WORDS] {
-    let mut buf = [0u32; TIMING_BUF_WORDS];
-    for bit in 0..COLOR_DEPTH {
-        let full_on = base_cycles << bit;
-        let on_cycles = (full_on * brightness as u32) / 255;
-        let off_cycles = (full_on - on_cycles) / 2 + 10;
-        buf[bit * 2] = off_cycles;
-        buf[bit * 2 + 1] = on_cycles;
-    }
-    buf
-}
-
-/// Estimate display refresh rate in Hz.
-pub fn estimate_refresh_rate(
-    pio_clock_hz: u32,
-    pixels_per_row: u32,
-    pio_cycles_per_pixel: u32,
-    base_cycles: u32,
-    brightness: u8,
-) -> u32 {
-    let data_cycles = pixels_per_row * pio_cycles_per_pixel;
-    let mut total: u32 = 0;
-    for bit in 0..COLOR_DEPTH {
-        let full_on = base_cycles << bit;
-        let on_cycles = (full_on * brightness as u32) / 255;
-        let off_cycles = (full_on - on_cycles) / 2 + 10;
-        let addr_cycles = off_cycles + on_cycles + off_cycles;
-        total += (data_cycles + addr_cycles) * ROW_PAIRS as u32;
-    }
-    if total == 0 { 0 } else { pio_clock_hz / total }
 }

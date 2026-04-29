@@ -1,5 +1,5 @@
 [workspace]
-members = ["learning-examples", "usb-display/firmware"]
+members = ["learning-examples", "usb-display/firmware", "hub75"]
 exclude = ["usb-display/client/rust"]
 resolver = "2"
 

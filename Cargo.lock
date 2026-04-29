@@ -854,6 +854,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "hub75"
+version = "0.3.0"
+dependencies = [
+ "cortex-m",
+ "cortex-m-rt",
+ "defmt 0.3.100",
+ "defmt-rtt",
+ "embassy-executor",
+ "embassy-futures",
+ "embassy-rp",
+ "embassy-sync",
+ "embassy-time",
+ "panic-probe",
+ "pio 0.3.0",
+ "static_cell",
+]
+
+[[package]]
 name = "ident_case"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1818,7 +1836,7 @@ dependencies = [
 
 [[package]]
 name = "usb-display-firmware"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "cortex-m",
  "cortex-m-rt",
@@ -1827,10 +1845,11 @@ dependencies = [
  "embassy-executor",
  "embassy-futures",
  "embassy-rp",
+ "embassy-sync",
  "embassy-time",
  "embassy-usb",
+ "hub75",
  "panic-probe",
- "pio 0.3.0",
  "static_cell",
 ]
 

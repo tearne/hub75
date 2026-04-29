@@ -2,3 +2,5 @@
 /target
 *.uf2
 __pycache__
+CLAUDE.md
+changes/agent/
