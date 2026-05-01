@@ -149,8 +149,10 @@ const CPU_SYSTEM:  [u8; 3] = [0, 170, 120];    // teal — green-dominant to sep
 const CPU_IOWAIT:  [u8; 3] = [80, 100, 255];   // brighter saturated blue
 
 const RAM_USED:    [u8; 3] = [220, 60, 180];   // bright magenta — truly committed
-const RAM_BUFFERS: [u8; 3] = [30, 20, 60];     // dim violet — reclaimable, shifted off the USED hue
-const RAM_CACHED:  [u8; 3] = [10, 8, 22];      // very dim slate — reclaimable, almost background
+#[allow(dead_code)]
+const RAM_BUFFERS: [u8; 3] = [30, 20, 60];     // dim violet — reclaimable (currently not rendered)
+#[allow(dead_code)]
+const RAM_CACHED:  [u8; 3] = [10, 8, 22];      // very dim slate — reclaimable (currently not rendered)
 
 const DISK_READ:   [u8; 3] = [255, 200, 50];   // bright gold-yellow
 const DISK_WRITE:  [u8; 3] = [240, 90, 20];    // orange-red
@@ -160,8 +162,21 @@ const NET_UP:      [u8; 3] = [160, 240, 30];   // lime
 
 // ── Log-scale endpoints for unbounded throughput metrics ───────────
 
-const LOG_MIN_BPS: f32 = 1_000.0;            // 1 KB/s — bottom of bar
-const LOG_MAX_BPS: f32 = 1_000_000_000.0;    // 1 GB/s — top of bar
+// Per-channel log-scale endpoints. The MIN is the "anything below is
+// invisible" floor (1 KB/s — values lower than this contribute zero).
+// The MAX is the *minimum* upper bound: the actual scale max is
+// `max(buffer_peak, MAX_FLOOR)`, so quiet periods don't auto-expand the
+// scale into noise but bursty periods scale up to fit. As bursts scroll
+// out of the visible buffer, the scale relaxes back.
+const DISK_READ_LOG_MIN:        f32 = 1_000.0;
+const DISK_READ_LOG_MAX_FLOOR:  f32 = 1_000_000.0;       // 1 MB/s
+const DISK_WRITE_LOG_MIN:       f32 = 1_000.0;
+const DISK_WRITE_LOG_MAX_FLOOR: f32 = 1_000_000.0;
+
+const NET_DOWN_LOG_MIN:         f32 = 1_000.0;
+const NET_DOWN_LOG_MAX_FLOOR:   f32 = 1_000_000.0;
+const NET_UP_LOG_MIN:           f32 = 1_000.0;
+const NET_UP_LOG_MAX_FLOOR:     f32 = 1_000_000.0;
 
 // ── Update interval bounds ─────────────────────────────────────────
 
@@ -178,8 +193,8 @@ const RENDER_INTERVAL:      Duration = Duration::from_millis(1000 / RENDER_FPS);
 /// `BLUR_SIGMA` sets the Gaussian standard deviation. Truncation at
 /// `BLUR_HALF_PIX` clips the long tail; with σ ≈ 1.0 and half-pix = 2, the
 /// weight at the boundary is ~0.14 (visible but small).
-const BLUR_HALF_PIX: i32 = 2;
-const BLUR_SIGMA:    f32 = 0.7;
+const BLUR_HALF_PIX: i32 = 1;
+const BLUR_SIGMA:    f32 = 0.5;
 
 // ── Run ────────────────────────────────────────────────────────────
 
@@ -336,10 +351,11 @@ struct IoSample {
 }
 
 #[derive(Clone, Copy, Default)]
+#[allow(dead_code)]
 struct RamComposition {
     used_kb:    u64,
-    buffers_kb: u64,
-    cached_kb:  u64,
+    buffers_kb: u64,    // currently not rendered (reclaimable)
+    cached_kb:  u64,    // currently not rendered (reclaimable)
     total_kb:   u64,
 }
 
@@ -579,27 +595,22 @@ type Canvas = [[u16; 3]; LW * LH];
 /// Clips to canvas bounds only — blur extends freely across strip,
 /// sub-strip, and layer boundaries.
 fn splat_dot(canvas: &mut Canvas, x: usize, y_subpix: f32, colour: [u8; 3], alpha: f32) {
-    if alpha <= 0.0 { return; }
+    if alpha <= 0.0 || x >= LW { return; }
+    // Vertical-only Gaussian (motion direction): small kernel softens
+    // sub-pixel sliding without smearing across columns. No horizontal
+    // blur at all — dots stay one pixel wide, sharp on the x axis.
     let two_sigma_sq = 2.0 * BLUR_SIGMA * BLUR_SIGMA;
     let cy = y_subpix.round() as i32;
-    let cx = x as i32;
     for dy in -BLUR_HALF_PIX..=BLUR_HALF_PIX {
         let py = cy + dy;
         if py < 0 || py >= LH as i32 { continue; }
         let py = py as usize;
         let yd = py as f32 - y_subpix;
-        let yw = (-yd * yd / two_sigma_sq).exp();
-        for dx in -BLUR_HALF_PIX..=BLUR_HALF_PIX {
-            let px = cx + dx;
-            if px < 0 || px >= LW as i32 { continue; }
-            let xd = dx as f32;
-            let xw = (-xd * xd / two_sigma_sq).exp();
-            let weight = xw * yw * alpha;
-            let idx = py * LW + px as usize;
-            for c in 0..3 {
-                let add = (colour[c] as f32 * weight) as u16;
-                canvas[idx][c] = canvas[idx][c].saturating_add(add);
-            }
+        let weight = (-yd * yd / two_sigma_sq).exp() * alpha;
+        let idx = py * LW + x;
+        for c in 0..3 {
+            let add = (colour[c] as f32 * weight) as u16;
+            canvas[idx][c] = canvas[idx][c].saturating_add(add);
         }
     }
 }
@@ -656,13 +667,14 @@ fn dots_for(fraction: f32, width: usize) -> usize {
     (fraction.clamp(0.0, 1.0) * width as f32).round() as usize
 }
 
-/// Map bytes-per-second to a fraction in [0, 1] using log10 between
-/// `LOG_MIN_BPS` and `LOG_MAX_BPS`.
-fn log_fraction(bps: f32) -> f32 {
-    if bps <= LOG_MIN_BPS { return 0.0; }
+/// Map bytes-per-second to a fraction in [0, 1] using log10 between the
+/// given min and max. Each I/O channel has its own min/max so reads and
+/// writes (or down and up) can be normalised independently.
+fn log_fraction(bps: f32, min_bps: f32, max_bps: f32) -> f32 {
+    if bps <= min_bps { return 0.0; }
     let logged   = bps.log10();
-    let log_min  = LOG_MIN_BPS.log10();
-    let log_max  = LOG_MAX_BPS.log10();
+    let log_min  = min_bps.log10();
+    let log_max  = max_bps.log10();
     ((logged - log_min) / (log_max - log_min)).clamp(0.0, 1.0)
 }
 
@@ -718,10 +730,33 @@ fn window_alpha(r: usize) -> f32 {
     base / n.powf(0.7)
 }
 
+/// Continuous alpha as a function of sub-pixel y. Each logical row r
+/// spans y in [r-1, r], centred at y = r - 0.5. Linearly interpolates
+/// `window_alpha` between adjacent row centres so a sample's alpha stays
+/// continuous as it slides across logical-row boundaries (at the push
+/// moment a sample's y is unchanged but its `r` advances by one — under
+/// the per-row alpha lookup, that's a discontinuity; here it's not).
+fn alpha_at_y(y: f32) -> f32 {
+    let r_lower = (y + 0.5).floor() as i32;
+    let r_upper = r_lower + 1;
+    let alpha_at = |r: i32| -> f32 {
+        if r < 0 || r >= TOTAL_ROWS as i32 {
+            0.0
+        } else {
+            window_alpha(r as usize)
+        }
+    };
+    let alpha_lower = alpha_at(r_lower);
+    let alpha_upper = alpha_at(r_upper);
+    let y_centre_lower = r_lower as f32 - 0.5;
+    let frac = (y - y_centre_lower).clamp(0.0, 1.0);
+    alpha_lower * (1.0 - frac) + alpha_upper * frac
+}
+
 fn draw_cpu_strip(canvas: &mut Canvas, buffer: &VecDeque<CpuSample>, t: f32) {
     for_each_window_sample(buffer, |sample, r, w| {
         let y = window_y(r, w, t);
-        let alpha = window_alpha(r);
+        let alpha = alpha_at_y(y);
         for core_idx in 0..CORE_COUNT {
             let core_left = CPU_LEFT + core_idx * CORE_WIDTH;
             let core = sample.cores[core_idx];
@@ -739,12 +774,14 @@ fn draw_cpu_strip(canvas: &mut Canvas, buffer: &VecDeque<CpuSample>, t: f32) {
 fn draw_ram_strip(canvas: &mut Canvas, buffer: &VecDeque<RamSample>, t: f32) {
     for_each_window_sample(buffer, |sample, r, w| {
         let y = window_y(r, w, t);
-        let alpha = window_alpha(r);
+        let alpha = alpha_at_y(y);
         let total = sample.composition.total_kb.max(1) as f32;
+        // Only "used" memory — i.e. truly in-use, not reclaimable.
+        // Matches what htop's "Mem" bar reports as used. Buffers and
+        // cached are reclaimable and treated as available, so they don't
+        // get dots.
         let segments = [
-            (dots_for(sample.composition.used_kb    as f32 / total, RAM_WIDTH), RAM_USED),
-            (dots_for(sample.composition.buffers_kb as f32 / total, RAM_WIDTH), RAM_BUFFERS),
-            (dots_for(sample.composition.cached_kb  as f32 / total, RAM_WIDTH), RAM_CACHED),
+            (dots_for(sample.composition.used_kb as f32 / total, RAM_WIDTH), RAM_USED),
         ];
         paint_dot_row(canvas, y, RAM_LEFT, RAM_WIDTH, sample.seed, alpha, &segments);
     });
@@ -760,25 +797,24 @@ fn draw_ram_strip(canvas: &mut Canvas, buffer: &VecDeque<RamSample>, t: f32) {
 fn draw_disk_strip(canvas: &mut Canvas, buffer: &VecDeque<IoSample>, t: f32) {
     draw_layered_strip(
         canvas, DISK_LEFT, LAYER_HALF_COLS, buffer, t,
-        |s| s.b_bps, DISK_WRITE,   // outer (left): write
-        |s| s.a_bps, DISK_READ,    // inner (right): read
+        |s| s.b_bps, DISK_WRITE, DISK_WRITE_LOG_MIN, DISK_WRITE_LOG_MAX_FLOOR, // outer (left): write
+        |s| s.a_bps, DISK_READ,  DISK_READ_LOG_MIN,  DISK_READ_LOG_MAX_FLOOR,  // inner (right): read
     );
 }
 
 fn draw_net_strip(canvas: &mut Canvas, buffer: &VecDeque<IoSample>, t: f32) {
     draw_layered_strip(
         canvas, NET_LEFT, LAYER_HALF_COLS, buffer, t,
-        |s| s.a_bps, NET_DOWN,     // inner (left): download
-        |s| s.b_bps, NET_UP,       // outer (right): upload
+        |s| s.a_bps, NET_DOWN, NET_DOWN_LOG_MIN, NET_DOWN_LOG_MAX_FLOOR, // inner (left): download
+        |s| s.b_bps, NET_UP,   NET_UP_LOG_MIN,   NET_UP_LOG_MAX_FLOOR,   // outer (right): upload
     );
 }
 
 /// Two-channel throughput as two side-by-side layers within one strip.
-/// `left_pick` / `right_pick` choose which sample field feeds each side,
-/// so callers can map "input on the inside" regardless of which canvas
-/// edge the strip sits on. Each layer scales independently against the log
-/// endpoints, and gets its own derived seed so the two halves don't share
-/// a permutation.
+/// Each side gets its own pick function, colour, log-scale min, and
+/// log-scale max-floor. The actual scale max for each channel is
+/// `max(channel's buffer peak, that channel's max-floor)`, so the scale
+/// auto-adapts upward to bursts but doesn't shrink below the floor.
 fn draw_layered_strip(
     canvas: &mut Canvas,
     left: usize,
@@ -787,14 +823,24 @@ fn draw_layered_strip(
     t: f32,
     left_pick:  impl Fn(&IoSample) -> f32,
     left_colour: [u8; 3],
+    left_log_min: f32,
+    left_log_max_floor: f32,
     right_pick: impl Fn(&IoSample) -> f32,
     right_colour: [u8; 3],
+    right_log_min: f32,
+    right_log_max_floor: f32,
 ) {
+    let buffer_max = |pick: &dyn Fn(&IoSample) -> f32| -> f32 {
+        buffer.iter().map(pick).fold(0.0_f32, f32::max)
+    };
+    let left_max  = buffer_max(&left_pick).max(left_log_max_floor);
+    let right_max = buffer_max(&right_pick).max(right_log_max_floor);
+
     for_each_window_sample(buffer, |sample, r, w| {
         let y = window_y(r, w, t);
-        let alpha = window_alpha(r);
-        let n_left  = dots_for(log_fraction(left_pick(sample)),  half_cols);
-        let n_right = dots_for(log_fraction(right_pick(sample)), half_cols);
+        let alpha = alpha_at_y(y);
+        let n_left  = dots_for(log_fraction(left_pick(sample),  left_log_min,  left_max),  half_cols);
+        let n_right = dots_for(log_fraction(right_pick(sample), right_log_min, right_max), half_cols);
         paint_dot_row(
             canvas, y, left, half_cols,
             sample.seed.wrapping_add(0xA1B2C3D4), alpha,
