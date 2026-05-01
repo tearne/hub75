@@ -1,6 +1,6 @@
 [package]
 name = "hub75-client"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2021"
 description = "Host-side client for sending frames to a HUB75 display over USB serial"
 

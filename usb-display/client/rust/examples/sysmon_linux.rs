@@ -67,11 +67,56 @@ const _: () = assert!(DISK_LEFT + DISK_WIDTH + CPU_WIDTH + RAM_WIDTH + NET_WIDTH
                       "strip widths must fill the canvas");
 const _: () = assert!(CORE_WIDTH * CORE_COUNT == CPU_WIDTH, "CPU sub-strips must fill the column");
 
-/// History depth — `LH` visible rows plus one imaginary row off the top
-/// (newest sample slides in from y=-1) and one off the bottom (oldest
-/// sample slides out through y=LH). Both edges therefore taper smoothly
-/// across canvas boundaries instead of popping.
-const HIST_LEN: usize = LH + 2;
+/// Continuous time compression: every canvas row gets its own window into
+/// a single shared buffer of raw samples. Top rows cover one or two raw
+/// samples (fast motion); bottom rows cover many (slow motion). Window
+/// sizes grow geometrically with row, so dots appear to slow down as they
+/// fall — without any visible breakpoints between bands.
+///
+/// `TOTAL_ROWS` includes one imaginary row above the canvas (logical row
+/// 0, slide-in for the newest sample) and one below (logical row `LH+1`,
+/// slide-out for the oldest visible sample). Visible canvas rows 0..LH-1
+/// correspond to logical rows 1..=LH.
+const TOTAL_ROWS: usize = LH + 2;
+
+/// Geometric base for window growth, scaled by 100 to keep the const-fn
+/// computation in integer arithmetic. 106 / 100 = 1.06 → window size at
+/// logical row r (for visible rows) is `ceil(1.06^(r-1))`.
+const BLUR_BASE_NUM: u64 = 106;
+const BLUR_BASE_DEN: u64 = 100;
+
+const WINDOW_SIZES:  [usize; TOTAL_ROWS] = compute_window_sizes();
+const WINDOW_STARTS: [usize; TOTAL_ROWS] = compute_window_starts();
+const BUFFER_LEN:    usize               = WINDOW_STARTS[TOTAL_ROWS - 1] + WINDOW_SIZES[TOTAL_ROWS - 1];
+
+const fn compute_window_sizes() -> [usize; TOTAL_ROWS] {
+    let mut sizes = [1usize; TOTAL_ROWS];
+    // sizes[0] = 1 (imaginary above), sizes[TOTAL_ROWS - 1] = 1 (imaginary below).
+    // For visible rows logical_row = 1..=LH, window size = ceil(BASE^(logical_row - 1))
+    // computed in fixed-point integer arithmetic to keep this const-evaluable.
+    let scale: u64 = 1_000_000_000;
+    let mut val: u64 = scale;          // BASE^0 = 1
+    let mut k = 0;
+    while k < LH {
+        sizes[1 + k] = ((val + scale - 1) / scale) as usize;
+        val = val * BLUR_BASE_NUM / BLUR_BASE_DEN;
+        k += 1;
+    }
+    sizes
+}
+
+const fn compute_window_starts() -> [usize; TOTAL_ROWS] {
+    let sizes = compute_window_sizes();
+    let mut starts = [0usize; TOTAL_ROWS];
+    let mut total = 0usize;
+    let mut r = 0;
+    while r < TOTAL_ROWS {
+        starts[r] = total;
+        total += sizes[r];
+        r += 1;
+    }
+    starts
+}
 
 /// Upper bound on shuffle-buffer length, large enough for the widest
 /// strip's dot-position pool (CPU at 14).
@@ -130,7 +175,7 @@ const RENDER_INTERVAL:      Duration = Duration::from_millis(1000 / RENDER_FPS);
 /// `BLUR_HALF_PIX` clips the long tail; with σ ≈ 1.0 and half-pix = 2, the
 /// weight at the boundary is ~0.14 (visible but small).
 const BLUR_HALF_PIX: i32 = 2;
-const BLUR_SIGMA:    f32 = 1.0;
+const BLUR_SIGMA:    f32 = 0.7;
 
 // ── Run ────────────────────────────────────────────────────────────
 
@@ -339,11 +384,11 @@ fn sample_loop(snapshot: Arc<Mutex<Snapshot>>, interval: Duration) {
 
         let push_at = Instant::now();
         let mut s = snapshot.lock().unwrap();
-        push_history(&mut s.cpu, cpu_sample, HIST_LEN);
+        push_history(&mut s.cpu, cpu_sample, BUFFER_LEN);
         s.cpu_at = push_at;
-        if let Some(r) = ram_sample  { push_history(&mut s.ram,  r, HIST_LEN); s.ram_at  = push_at; }
-        if let Some(d) = disk_sample { push_history(&mut s.disk, d, HIST_LEN); s.disk_at = push_at; }
-        if let Some(n) = net_sample  { push_history(&mut s.net,  n, HIST_LEN); s.net_at  = push_at; }
+        if let Some(r) = ram_sample  { push_history(&mut s.ram,  r, BUFFER_LEN); s.ram_at  = push_at; }
+        if let Some(d) = disk_sample { push_history(&mut s.disk, d, BUFFER_LEN); s.disk_at = push_at; }
+        if let Some(n) = net_sample  { push_history(&mut s.net,  n, BUFFER_LEN); s.net_at  = push_at; }
     }
 }
 
@@ -619,20 +664,60 @@ fn log_fraction(bps: f32) -> f32 {
 
 // ── Strip renderers ────────────────────────────────────────────────
 //
-// Each renderer takes `t ∈ [0, 1)` — fractional progress to the next sample
-// for that metric — and slides every row down by `t` pixels. The newest
-// sample lives at logical `y = -1 + t`, i.e. one row off the top of the
-// canvas at sample-time, sliding into view as `t` grows. By the time the
-// next sample arrives, it has reached `y = 0` (so its successor lands at
-// `y = -1`, continuing the chain). This spatial slide-in replaces the old
-// alpha fade-in: the Gaussian kernel naturally tapers as the dot crosses
-// the edge, so the top stays steadily lit when activity is constant.
+// Every sample in a metric's buffer is rendered individually at a sub-pixel
+// y position derived from its window assignment. For a sample at buffer
+// index `i`, find the logical row `r` whose window contains `i` (so
+// `WINDOW_STARTS[r] <= i < WINDOW_STARTS[r] + WINDOW_SIZES[r]`) and let
+// `w = i - WINDOW_STARTS[r]` be its position within that window. Then:
+//
+//     y     = (r as f32 - 1.0) + (w as f32 + t) / N(r) as f32
+//     alpha = 1.0 / N(r) as f32
+//
+// The `-1.0` shift puts logical row 0 (imaginary above) off the top of the
+// canvas. As `t` runs 0 → 1, every sample slides forward by `1/N(r)` of a
+// pixel — fast in row 1 (1 px/period) and slow at the bottom (~1/12
+// px/period for `b = 1.04`). Brightness compensation `1/N(r)` keeps
+// summed per-row intensity consistent across the panel.
 
-const TOP_SLIDE_OFFSET: f32 = -1.0;
+/// Visit every populated `(sample, logical_row, w_in_window)` triple in
+/// the buffer in window order, calling `f` for each. Stops early if the
+/// buffer hasn't accumulated enough samples to reach a row's window yet.
+fn for_each_window_sample<T>(
+    buffer: &VecDeque<T>,
+    mut f: impl FnMut(&T, usize, usize),
+) {
+    for r in 0..TOTAL_ROWS {
+        for w in 0..WINDOW_SIZES[r] {
+            let i = WINDOW_STARTS[r] + w;
+            match buffer.get(i) {
+                Some(sample) => f(sample, r, w),
+                None => return,
+            }
+        }
+    }
+}
 
-fn draw_cpu_strip(canvas: &mut Canvas, history: &VecDeque<CpuSample>, t: f32) {
-    for (i, sample) in history.iter().enumerate() {
-        let y = i as f32 + t + TOP_SLIDE_OFFSET;
+fn window_y(r: usize, w: usize, t: f32) -> f32 {
+    (r as f32 - 1.0) + (w as f32 + t) / WINDOW_SIZES[r] as f32
+}
+
+fn window_alpha(r: usize) -> f32 {
+    // `1/N` gives mathematically uniform per-column expected brightness,
+    // but at sparse activity the top reads as bright spots (high variance)
+    // while the bottom reads as a dim uniform glow — perceived as a
+    // dark-going-down gradient. `1/sqrt(N)` over-corrected, making the
+    // bottom over-saturate. `1/N^0.7` is the compromise: bottom uniform
+    // ≈ top peak, so neither side dominates. Plus a 0.5× global dim and a
+    // halved-again multiplier on the imaginary edge rows.
+    let n = WINDOW_SIZES[r] as f32;
+    let base = if r == 0 || r == TOTAL_ROWS - 1 { 0.1 } else { 0.5 };
+    base / n.powf(0.7)
+}
+
+fn draw_cpu_strip(canvas: &mut Canvas, buffer: &VecDeque<CpuSample>, t: f32) {
+    for_each_window_sample(buffer, |sample, r, w| {
+        let y = window_y(r, w, t);
+        let alpha = window_alpha(r);
         for core_idx in 0..CORE_COUNT {
             let core_left = CPU_LEFT + core_idx * CORE_WIDTH;
             let core = sample.cores[core_idx];
@@ -642,22 +727,23 @@ fn draw_cpu_strip(canvas: &mut Canvas, history: &VecDeque<CpuSample>, t: f32) {
                 (dots_for(core.iowait, CORE_WIDTH), CPU_IOWAIT),
             ];
             let core_seed = mix32(sample.seed, core_idx as u32);
-            paint_dot_row(canvas, y, core_left, CORE_WIDTH, core_seed, 1.0, &segments);
+            paint_dot_row(canvas, y, core_left, CORE_WIDTH, core_seed, alpha, &segments);
         }
-    }
+    });
 }
 
-fn draw_ram_strip(canvas: &mut Canvas, history: &VecDeque<RamSample>, t: f32) {
-    for (i, sample) in history.iter().enumerate() {
-        let y = i as f32 + t + TOP_SLIDE_OFFSET;
+fn draw_ram_strip(canvas: &mut Canvas, buffer: &VecDeque<RamSample>, t: f32) {
+    for_each_window_sample(buffer, |sample, r, w| {
+        let y = window_y(r, w, t);
+        let alpha = window_alpha(r);
         let total = sample.composition.total_kb.max(1) as f32;
         let segments = [
             (dots_for(sample.composition.used_kb    as f32 / total, RAM_WIDTH), RAM_USED),
             (dots_for(sample.composition.buffers_kb as f32 / total, RAM_WIDTH), RAM_BUFFERS),
             (dots_for(sample.composition.cached_kb  as f32 / total, RAM_WIDTH), RAM_CACHED),
         ];
-        paint_dot_row(canvas, y, RAM_LEFT, RAM_WIDTH, sample.seed, 1.0, &segments);
-    }
+        paint_dot_row(canvas, y, RAM_LEFT, RAM_WIDTH, sample.seed, alpha, &segments);
+    });
 }
 
 // Disk and Net put their input channel (read / download) on the inner
@@ -667,17 +753,17 @@ fn draw_ram_strip(canvas: &mut Canvas, history: &VecDeque<RamSample>, t: f32) {
 // (a_bps, b_bps) field order. Net is the rightmost strip so download
 // already lands on the inner (left) half naturally.
 
-fn draw_disk_strip(canvas: &mut Canvas, history: &VecDeque<IoSample>, t: f32) {
+fn draw_disk_strip(canvas: &mut Canvas, buffer: &VecDeque<IoSample>, t: f32) {
     draw_layered_strip(
-        canvas, DISK_LEFT, LAYER_HALF_COLS, history, t,
+        canvas, DISK_LEFT, LAYER_HALF_COLS, buffer, t,
         |s| s.b_bps, DISK_WRITE,   // outer (left): write
         |s| s.a_bps, DISK_READ,    // inner (right): read
     );
 }
 
-fn draw_net_strip(canvas: &mut Canvas, history: &VecDeque<IoSample>, t: f32) {
+fn draw_net_strip(canvas: &mut Canvas, buffer: &VecDeque<IoSample>, t: f32) {
     draw_layered_strip(
-        canvas, NET_LEFT, LAYER_HALF_COLS, history, t,
+        canvas, NET_LEFT, LAYER_HALF_COLS, buffer, t,
         |s| s.a_bps, NET_DOWN,     // inner (left): download
         |s| s.b_bps, NET_UP,       // outer (right): upload
     );
@@ -693,28 +779,29 @@ fn draw_layered_strip(
     canvas: &mut Canvas,
     left: usize,
     half_cols: usize,
-    history: &VecDeque<IoSample>,
+    buffer: &VecDeque<IoSample>,
     t: f32,
     left_pick:  impl Fn(&IoSample) -> f32,
     left_colour: [u8; 3],
     right_pick: impl Fn(&IoSample) -> f32,
     right_colour: [u8; 3],
 ) {
-    for (i, sample) in history.iter().enumerate() {
-        let y = i as f32 + t + TOP_SLIDE_OFFSET;
+    for_each_window_sample(buffer, |sample, r, w| {
+        let y = window_y(r, w, t);
+        let alpha = window_alpha(r);
         let n_left  = dots_for(log_fraction(left_pick(sample)),  half_cols);
         let n_right = dots_for(log_fraction(right_pick(sample)), half_cols);
         paint_dot_row(
             canvas, y, left, half_cols,
-            sample.seed.wrapping_add(0xA1B2C3D4), 1.0,
+            sample.seed.wrapping_add(0xA1B2C3D4), alpha,
             &[(n_left, left_colour)],
         );
         paint_dot_row(
             canvas, y, left + half_cols, half_cols,
-            sample.seed.wrapping_add(0x5E6F7081), 1.0,
+            sample.seed.wrapping_add(0x5E6F7081), alpha,
             &[(n_right, right_colour)],
         );
-    }
+    });
 }
 
 // ── Rotation packing ───────────────────────────────────────────────
