@@ -1,5 +1,5 @@
 .claude
-/target
+**/target
 *.uf2
 __pycache__
 CLAUDE.md

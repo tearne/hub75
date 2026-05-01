@@ -1,0 +1,28 @@
+[package]
+name = "sysmon"
+version = "0.1.0"
+edition = "2021"
+description = "HUB75 LED-panel system monitor — runs as a service, displays host CPU/RAM/Disk/Network on a 64x32 panel"
+license = "MIT"
+
+[dependencies]
+hub75-client = { path = "../rust", features = ["panel-64x32"] }
+
+[package.metadata.deb]
+maintainer = "tearne <o@tearne.org>"
+copyright = "Copyright (c) tearne"
+extended-description = """
+Renders host CPU (per-core), RAM, Disk I/O and Network throughput onto a
+HUB75 LED matrix panel via a Raspberry Pi Pico USB-display firmware.
+Tested only on Raspberry Pi 5 (aarch64). Installs and runs as a systemd
+service that auto-starts on boot.
+"""
+section = "utils"
+priority = "optional"
+depends = "$auto, libudev1"
+maintainer-scripts = "debian/"
+assets = [
+    ["target/release/sysmon", "/usr/bin/", "755"],
+    ["debian/sysmon.service", "/lib/systemd/system/", "644"],
+    ["README.md", "/usr/share/doc/sysmon/README.md", "644"],
+]

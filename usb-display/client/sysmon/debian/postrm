@@ -1,0 +1,16 @@
+#!/bin/sh
+set -e
+
+# On purge or upgrade-removal, stop and disable the service so we don't
+# leave systemd trying to start a binary that has just been removed.
+case "$1" in
+    purge|remove)
+        if [ -d /run/systemd/system ]; then
+            systemctl stop sysmon.service >/dev/null 2>&1 || true
+            systemctl disable sysmon.service >/dev/null 2>&1 || true
+            systemctl daemon-reload >/dev/null 2>&1 || true
+        fi
+        ;;
+esac
+
+exit 0

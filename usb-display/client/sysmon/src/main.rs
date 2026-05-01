@@ -13,7 +13,11 @@
 //! is a soft 5×5 Gaussian blob, blurred in both axes, so adjacent dots
 //! within a strip overlap into a continuous lit field.
 //!
-//! Run:  cargo run --release --example sysmon_linux --features panel-64x32
+//! Tested on Raspberry Pi 5; should work on any aarch64 Debian-based Linux
+//! host with USB CDC support and the matching HUB75 firmware on a Pico.
+//! See README.md for install instructions.
+//!
+//! Run:  cargo run --release  (or install via the deb package)
 
 #[cfg(not(target_os = "linux"))]
 fn main() {

@@ -63,14 +63,16 @@ client.send_frame_rgb(&frame)?;
 |---|---|
 | `life` | Conway's Game of Life. Each cell carries its own hue; new births inherit a shifted average of their neighbours' hues. Compares each generation against the state from 6 generations ago: when ≥95 % of pixels match (which catches period-1/2/3 cycles), a handful of random "particles" is injected to perturb the field back into evolution. |
 | `clock` | Mondaine-style Swiss Railway Clock — analogue face with a smoothly sweeping red second hand, fed from local time. |
-| `sysmon_linux` | Host system monitor on a 64×32 panel rotated into a 32×64 portrait view. Four vertical strips, left-to-right: Disk, CPU, RAM, Network. New samples appear at the top and slide downward as they age, smoothed by per-frame Gaussian blur subframes. CPU is split into 4 thin vertical sub-strips (one per Pi 5 core) so single-threaded workloads pinning a core are visible. Disk and Net split horizontally into read/write and down/up halves. CPU samples every tick; RAM/Net every 6 ticks; Disk every 20 ticks (`-u <ms>` rescales the whole panel). Disk and network use a fixed log scale (1 KB/s – 1 GB/s). Linux-only — reads `/proc` directly. |
 
 ```sh
 cd client/rust
 cargo run --release --example life          --features panel-64x32
 cargo run --release --example clock         --features panel-64x32
-cargo run --release --example sysmon_linux  --features panel-64x32
 ```
+
+### Sysmon — `client/sysmon/` (standalone crate)
+
+Linux host system monitor on a 64×32 panel rotated into a 32×64 portrait view. Four vertical strips (Disk, CPU per-core, RAM, Network) with continuously time-compressed history. Lives in its own crate because it ships as a Debian package + systemd service (auto-starts on boot). See [`client/sysmon/README.md`](client/sysmon/README.md) for install instructions. Tested on Raspberry Pi 5 only.
 
 ## Protocol
 

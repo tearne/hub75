@@ -1,0 +1,13 @@
+[Unit]
+Description=HUB75 panel system monitor
+After=multi-user.target
+
+[Service]
+ExecStart=/usr/bin/sysmon
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

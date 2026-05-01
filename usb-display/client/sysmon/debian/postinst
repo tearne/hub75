@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+
+# Reload, enable, and start the sysmon service after install.
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+    systemctl enable sysmon.service >/dev/null 2>&1 || true
+    systemctl start sysmon.service || true
+fi
+
+exit 0
