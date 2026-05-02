@@ -143,22 +143,38 @@ const PHASE_NET:  u64 = 4;
 const PHASE_DISK: u64 = 11;
 
 // ── Colour palettes ────────────────────────────────────────────────
+//
+// Each rendered metric carries a low/high pair: the dot's colour is
+// linearly interpolated between them by the same fraction that drives
+// dot count. Sustained high usage paints in the high-end colour;
+// sustained low usage paints in the low-end. This adds a
+// hue/brightness axis on top of the existing dot-density axis, which
+// matters most in the lower rows where many samples sum into one row
+// and per-sample density distinctions otherwise wash out.
 
-const CPU_USER:    [u8; 3] = [50, 230, 230];   // bright cyan
-const CPU_SYSTEM:  [u8; 3] = [0, 170, 120];    // teal — green-dominant to separate from iowait blue
-const CPU_IOWAIT:  [u8; 3] = [80, 100, 255];   // brighter saturated blue
+const CPU_USER_LOW:    [u8; 3] = [20, 70, 80];     // dim teal-grey
+const CPU_USER_HIGH:   [u8; 3] = [50, 230, 230];   // bright cyan
+const CPU_SYSTEM_LOW:  [u8; 3] = [0, 50, 40];      // dim forest
+const CPU_SYSTEM_HIGH: [u8; 3] = [0, 170, 120];    // teal — green-dominant to separate from iowait blue
+const CPU_IOWAIT_LOW:  [u8; 3] = [25, 30, 90];     // dim navy
+const CPU_IOWAIT_HIGH: [u8; 3] = [80, 100, 255];   // saturated blue
 
-const RAM_USED:    [u8; 3] = [220, 60, 180];   // bright magenta — truly committed
+const RAM_USED_LOW:    [u8; 3] = [60, 20, 80];     // dim violet
+const RAM_USED_HIGH:   [u8; 3] = [220, 60, 180];   // bright magenta — truly committed
 #[allow(dead_code)]
-const RAM_BUFFERS: [u8; 3] = [30, 20, 60];     // dim violet — reclaimable (currently not rendered)
+const RAM_BUFFERS:     [u8; 3] = [30, 20, 60];     // dim violet — reclaimable (currently not rendered)
 #[allow(dead_code)]
-const RAM_CACHED:  [u8; 3] = [10, 8, 22];      // very dim slate — reclaimable (currently not rendered)
+const RAM_CACHED:      [u8; 3] = [10, 8, 22];      // very dim slate — reclaimable (currently not rendered)
 
-const DISK_READ:   [u8; 3] = [255, 200, 50];   // bright gold-yellow
-const DISK_WRITE:  [u8; 3] = [240, 90, 20];    // orange-red
+const DISK_READ_LOW:   [u8; 3] = [80, 60, 15];     // dim olive
+const DISK_READ_HIGH:  [u8; 3] = [255, 200, 50];   // bright gold-yellow
+const DISK_WRITE_LOW:  [u8; 3] = [80, 25, 8];      // dim brown
+const DISK_WRITE_HIGH: [u8; 3] = [240, 90, 20];    // orange-red
 
-const NET_DOWN:    [u8; 3] = [0, 220, 80];     // bright green
-const NET_UP:      [u8; 3] = [160, 240, 30];   // lime
+const NET_DOWN_LOW:    [u8; 3] = [0, 60, 25];      // dim forest green
+const NET_DOWN_HIGH:   [u8; 3] = [0, 220, 80];     // bright green
+const NET_UP_LOW:      [u8; 3] = [55, 80, 10];     // dim olive-lime
+const NET_UP_HIGH:     [u8; 3] = [160, 240, 30];   // lime
 
 // ── Log-scale endpoints for unbounded throughput metrics ───────────
 
@@ -667,6 +683,19 @@ fn dots_for(fraction: f32, width: usize) -> usize {
     (fraction.clamp(0.0, 1.0) * width as f32).round() as usize
 }
 
+/// Linearly interpolate per-channel between two RGB anchors. `f` is
+/// clamped to [0, 1]. Used to colour each splat by the same fraction
+/// that drives its dot count.
+fn lerp_rgb(low: [u8; 3], high: [u8; 3], f: f32) -> [u8; 3] {
+    let f = f.clamp(0.0, 1.0);
+    let mix = |a: u8, b: u8| -> u8 {
+        let af = a as f32;
+        let bf = b as f32;
+        (af + (bf - af) * f).round().clamp(0.0, 255.0) as u8
+    };
+    [mix(low[0], high[0]), mix(low[1], high[1]), mix(low[2], high[2])]
+}
+
 /// Map bytes-per-second to a fraction in [0, 1] using log10 between the
 /// given min and max. Each I/O channel has its own min/max so reads and
 /// writes (or down and up) can be normalised independently.
@@ -761,9 +790,9 @@ fn draw_cpu_strip(canvas: &mut Canvas, buffer: &VecDeque<CpuSample>, t: f32) {
             let core_left = CPU_LEFT + core_idx * CORE_WIDTH;
             let core = sample.cores[core_idx];
             let segments = [
-                (dots_for(core.user,   CORE_WIDTH), CPU_USER),
-                (dots_for(core.system, CORE_WIDTH), CPU_SYSTEM),
-                (dots_for(core.iowait, CORE_WIDTH), CPU_IOWAIT),
+                (dots_for(core.user,   CORE_WIDTH), lerp_rgb(CPU_USER_LOW,   CPU_USER_HIGH,   core.user)),
+                (dots_for(core.system, CORE_WIDTH), lerp_rgb(CPU_SYSTEM_LOW, CPU_SYSTEM_HIGH, core.system)),
+                (dots_for(core.iowait, CORE_WIDTH), lerp_rgb(CPU_IOWAIT_LOW, CPU_IOWAIT_HIGH, core.iowait)),
             ];
             let core_seed = mix32(sample.seed, core_idx as u32);
             paint_dot_row(canvas, y, core_left, CORE_WIDTH, core_seed, alpha, &segments);
@@ -780,8 +809,9 @@ fn draw_ram_strip(canvas: &mut Canvas, buffer: &VecDeque<RamSample>, t: f32) {
         // Matches what htop's "Mem" bar reports as used. Buffers and
         // cached are reclaimable and treated as available, so they don't
         // get dots.
+        let used_frac = sample.composition.used_kb as f32 / total;
         let segments = [
-            (dots_for(sample.composition.used_kb as f32 / total, RAM_WIDTH), RAM_USED),
+            (dots_for(used_frac, RAM_WIDTH), lerp_rgb(RAM_USED_LOW, RAM_USED_HIGH, used_frac)),
         ];
         paint_dot_row(canvas, y, RAM_LEFT, RAM_WIDTH, sample.seed, alpha, &segments);
     });
@@ -797,16 +827,16 @@ fn draw_ram_strip(canvas: &mut Canvas, buffer: &VecDeque<RamSample>, t: f32) {
 fn draw_disk_strip(canvas: &mut Canvas, buffer: &VecDeque<IoSample>, t: f32) {
     draw_layered_strip(
         canvas, DISK_LEFT, LAYER_HALF_COLS, buffer, t,
-        |s| s.b_bps, DISK_WRITE, DISK_WRITE_LOG_MIN, DISK_WRITE_LOG_MAX_FLOOR, // outer (left): write
-        |s| s.a_bps, DISK_READ,  DISK_READ_LOG_MIN,  DISK_READ_LOG_MAX_FLOOR,  // inner (right): read
+        |s| s.b_bps, (DISK_WRITE_LOW, DISK_WRITE_HIGH), DISK_WRITE_LOG_MIN, DISK_WRITE_LOG_MAX_FLOOR, // outer (left): write
+        |s| s.a_bps, (DISK_READ_LOW,  DISK_READ_HIGH),  DISK_READ_LOG_MIN,  DISK_READ_LOG_MAX_FLOOR,  // inner (right): read
     );
 }
 
 fn draw_net_strip(canvas: &mut Canvas, buffer: &VecDeque<IoSample>, t: f32) {
     draw_layered_strip(
         canvas, NET_LEFT, LAYER_HALF_COLS, buffer, t,
-        |s| s.a_bps, NET_DOWN, NET_DOWN_LOG_MIN, NET_DOWN_LOG_MAX_FLOOR, // inner (left): download
-        |s| s.b_bps, NET_UP,   NET_UP_LOG_MIN,   NET_UP_LOG_MAX_FLOOR,   // outer (right): upload
+        |s| s.a_bps, (NET_DOWN_LOW, NET_DOWN_HIGH), NET_DOWN_LOG_MIN, NET_DOWN_LOG_MAX_FLOOR, // inner (left): download
+        |s| s.b_bps, (NET_UP_LOW,   NET_UP_HIGH),   NET_UP_LOG_MIN,   NET_UP_LOG_MAX_FLOOR,   // outer (right): upload
     );
 }
 
@@ -822,11 +852,11 @@ fn draw_layered_strip(
     buffer: &VecDeque<IoSample>,
     t: f32,
     left_pick:  impl Fn(&IoSample) -> f32,
-    left_colour: [u8; 3],
+    left_gradient: ([u8; 3], [u8; 3]),
     left_log_min: f32,
     left_log_max_floor: f32,
     right_pick: impl Fn(&IoSample) -> f32,
-    right_colour: [u8; 3],
+    right_gradient: ([u8; 3], [u8; 3]),
     right_log_min: f32,
     right_log_max_floor: f32,
 ) {
@@ -839,17 +869,21 @@ fn draw_layered_strip(
     for_each_window_sample(buffer, |sample, r, w| {
         let y = window_y(r, w, t);
         let alpha = alpha_at_y(y);
-        let n_left  = dots_for(log_fraction(left_pick(sample),  left_log_min,  left_max),  half_cols);
-        let n_right = dots_for(log_fraction(right_pick(sample), right_log_min, right_max), half_cols);
+        let frac_left  = log_fraction(left_pick(sample),  left_log_min,  left_max);
+        let frac_right = log_fraction(right_pick(sample), right_log_min, right_max);
+        let n_left  = dots_for(frac_left,  half_cols);
+        let n_right = dots_for(frac_right, half_cols);
+        let colour_left  = lerp_rgb(left_gradient.0,  left_gradient.1,  frac_left);
+        let colour_right = lerp_rgb(right_gradient.0, right_gradient.1, frac_right);
         paint_dot_row(
             canvas, y, left, half_cols,
             sample.seed.wrapping_add(0xA1B2C3D4), alpha,
-            &[(n_left, left_colour)],
+            &[(n_left, colour_left)],
         );
         paint_dot_row(
             canvas, y, left + half_cols, half_cols,
             sample.seed.wrapping_add(0x5E6F7081), alpha,
-            &[(n_right, right_colour)],
+            &[(n_right, colour_right)],
         );
     });
 }
