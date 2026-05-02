@@ -152,29 +152,32 @@ const PHASE_DISK: u64 = 11;
 // matters most in the lower rows where many samples sum into one row
 // and per-sample density distinctions otherwise wash out.
 
-const CPU_USER_LOW:    [u8; 3] = [20, 70, 80];     // dim teal-grey
+// Spectrum spread: red → amber → lime → green → cyan → azure → blue
+// → magenta. CPU clusters its three sub-shades in the blue band; RAM
+// owns magenta; DISK occupies the warm side; NET occupies green.
+const CPU_USER_LOW:    [u8; 3] = [10, 65, 70];     // dim teal-grey
 const CPU_USER_HIGH:   [u8; 3] = [50, 230, 230];   // bright cyan
-const CPU_SYSTEM_LOW:  [u8; 3] = [0, 50, 40];      // dim forest
-const CPU_SYSTEM_HIGH: [u8; 3] = [0, 170, 120];    // teal — green-dominant to separate from iowait blue
-const CPU_IOWAIT_LOW:  [u8; 3] = [25, 30, 90];     // dim navy
-const CPU_IOWAIT_HIGH: [u8; 3] = [80, 100, 255];   // saturated blue
+const CPU_SYSTEM_LOW:  [u8; 3] = [15, 40, 70];     // dim slate
+const CPU_SYSTEM_HIGH: [u8; 3] = [60, 150, 240];   // azure blue
+const CPU_IOWAIT_LOW:  [u8; 3] = [15, 20, 80];     // dim navy
+const CPU_IOWAIT_HIGH: [u8; 3] = [60, 80, 240];    // saturated deep blue
 
-const RAM_USED_LOW:    [u8; 3] = [60, 20, 80];     // dim violet
-const RAM_USED_HIGH:   [u8; 3] = [220, 60, 180];   // bright magenta — truly committed
+const RAM_USED_LOW:    [u8; 3] = [60, 20, 75];     // dim violet
+const RAM_USED_HIGH:   [u8; 3] = [230, 60, 170];   // bright magenta — truly committed
 #[allow(dead_code)]
 const RAM_BUFFERS:     [u8; 3] = [30, 20, 60];     // dim violet — reclaimable (currently not rendered)
 #[allow(dead_code)]
 const RAM_CACHED:      [u8; 3] = [10, 8, 22];      // very dim slate — reclaimable (currently not rendered)
 
-const DISK_READ_LOW:   [u8; 3] = [80, 60, 15];     // dim olive
-const DISK_READ_HIGH:  [u8; 3] = [255, 200, 50];   // bright gold-yellow
-const DISK_WRITE_LOW:  [u8; 3] = [80, 25, 8];      // dim brown
-const DISK_WRITE_HIGH: [u8; 3] = [240, 90, 20];    // orange-red
+const DISK_READ_LOW:   [u8; 3] = [80, 55, 10];     // dim umber
+const DISK_READ_HIGH:  [u8; 3] = [255, 175, 40];   // amber-gold
+const DISK_WRITE_LOW:  [u8; 3] = [80, 15, 15];     // dim crimson
+const DISK_WRITE_HIGH: [u8; 3] = [240, 50, 50];    // bright red
 
-const NET_DOWN_LOW:    [u8; 3] = [0, 60, 25];      // dim forest green
-const NET_DOWN_HIGH:   [u8; 3] = [0, 220, 80];     // bright green
-const NET_UP_LOW:      [u8; 3] = [55, 80, 10];     // dim olive-lime
-const NET_UP_HIGH:     [u8; 3] = [160, 240, 30];   // lime
+const NET_DOWN_LOW:    [u8; 3] = [10, 70, 30];     // dim forest
+const NET_DOWN_HIGH:   [u8; 3] = [40, 220, 90];    // bright green
+const NET_UP_LOW:      [u8; 3] = [55, 80, 10];     // dim olive
+const NET_UP_HIGH:     [u8; 3] = [200, 240, 40];   // yellow-lime
 
 // ── Log-scale endpoints for unbounded throughput metrics ───────────
 
@@ -526,7 +529,6 @@ fn read_cpu_times_all() -> std::io::Result<[CpuTimes; CORE_COUNT]> {
 fn read_ram_composition() -> std::io::Result<RamComposition> {
     let text = std::fs::read_to_string("/proc/meminfo")?;
     let mut total = 0u64;
-    let mut free = 0u64;
     let mut available = 0u64;
     let mut buffers = 0u64;
     let mut cached = 0u64;
@@ -537,7 +539,6 @@ fn read_ram_composition() -> std::io::Result<RamComposition> {
         let value: u64 = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
         match key {
             "MemTotal:"     => total = value,
-            "MemFree:"      => free = value,
             "MemAvailable:" => available = value,
             "Buffers:"      => buffers = value,
             "Cached:"       => cached = value,
@@ -546,7 +547,11 @@ fn read_ram_composition() -> std::io::Result<RamComposition> {
         }
     }
     let cached_total = cached + sreclaimable;
-    let used = total.saturating_sub(available.max(free + buffers + cached_total));
+    // `total - available` matches btop / `free`'s "used" reading. The
+    // kernel's `MemAvailable` is its best estimate of memory available
+    // for new processes (counting reclaimable cache, minus a watermark
+    // reserve), so subtracting it from total gives the working set.
+    let used = total.saturating_sub(available);
     Ok(RamComposition {
         used_kb: used,
         buffers_kb: buffers,
@@ -679,8 +684,13 @@ fn mix32(a: u32, b: u32) -> u32 {
 }
 
 /// Map a fraction in [0, 1] to a dot count over `width` candidate columns.
+/// Any non-zero fraction renders at least one dot, so a barely-active
+/// metric stays visible rather than disappearing under the rounding
+/// threshold (e.g. 5% in an 8-wide strip would otherwise round to 0).
 fn dots_for(fraction: f32, width: usize) -> usize {
-    (fraction.clamp(0.0, 1.0) * width as f32).round() as usize
+    let f = fraction.clamp(0.0, 1.0);
+    if f == 0.0 { return 0; }
+    ((f * width as f32).round() as usize).max(1)
 }
 
 /// Linearly interpolate per-channel between two RGB anchors. `f` is
@@ -789,10 +799,15 @@ fn draw_cpu_strip(canvas: &mut Canvas, buffer: &VecDeque<CpuSample>, t: f32) {
         for core_idx in 0..CORE_COUNT {
             let core_left = CPU_LEFT + core_idx * CORE_WIDTH;
             let core = sample.cores[core_idx];
+            // All three segments share the same gradient driver: total
+            // core activity. Hue still discriminates the kind of work
+            // (cyan/azure/blue), gradient intensity tracks how busy
+            // the core is overall.
+            let core_busy = (core.user + core.system + core.iowait).clamp(0.0, 1.0);
             let segments = [
-                (dots_for(core.user,   CORE_WIDTH), lerp_rgb(CPU_USER_LOW,   CPU_USER_HIGH,   core.user)),
-                (dots_for(core.system, CORE_WIDTH), lerp_rgb(CPU_SYSTEM_LOW, CPU_SYSTEM_HIGH, core.system)),
-                (dots_for(core.iowait, CORE_WIDTH), lerp_rgb(CPU_IOWAIT_LOW, CPU_IOWAIT_HIGH, core.iowait)),
+                (dots_for(core.user,   CORE_WIDTH), lerp_rgb(CPU_USER_LOW,   CPU_USER_HIGH,   core_busy)),
+                (dots_for(core.system, CORE_WIDTH), lerp_rgb(CPU_SYSTEM_LOW, CPU_SYSTEM_HIGH, core_busy)),
+                (dots_for(core.iowait, CORE_WIDTH), lerp_rgb(CPU_IOWAIT_LOW, CPU_IOWAIT_HIGH, core_busy)),
             ];
             let core_seed = mix32(sample.seed, core_idx as u32);
             paint_dot_row(canvas, y, core_left, CORE_WIDTH, core_seed, alpha, &segments);
