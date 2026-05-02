@@ -1,0 +1,9 @@
+[package]
+name = "sysmon2"
+version = "0.1.0"
+edition = "2021"
+description = "HUB75 LED-panel system monitor — first-principles rebuild of sysmon"
+license = "MIT"
+
+[dependencies]
+hub75-client = { path = "../rust", features = ["panel-64x32"] }
