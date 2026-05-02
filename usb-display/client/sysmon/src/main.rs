@@ -194,7 +194,7 @@ const RENDER_INTERVAL:      Duration = Duration::from_millis(1000 / RENDER_FPS);
 /// `BLUR_HALF_PIX` clips the long tail; with σ ≈ 1.0 and half-pix = 2, the
 /// weight at the boundary is ~0.14 (visible but small).
 const BLUR_HALF_PIX: i32 = 1;
-const BLUR_SIGMA:    f32 = 0.5;
+const BLUR_SIGMA:    f32 = 0.7;
 
 // ── Run ────────────────────────────────────────────────────────────
 
@@ -722,12 +722,12 @@ fn window_alpha(r: usize) -> f32 {
     // but at sparse activity the top reads as bright spots (high variance)
     // while the bottom reads as a dim uniform glow — perceived as a
     // dark-going-down gradient. `1/sqrt(N)` over-corrected, making the
-    // bottom over-saturate. `1/N^0.7` is the compromise: bottom uniform
+    // bottom over-saturate. `1/N^0.65` is the compromise: bottom uniform
     // ≈ top peak, so neither side dominates. Plus a 0.5× global dim and a
     // halved-again multiplier on the imaginary edge rows.
     let n = WINDOW_SIZES[r] as f32;
     let base = if r == 0 || r == TOTAL_ROWS - 1 { 0.1 } else { 0.5 };
-    base / n.powf(0.7)
+    base / n.powf(0.65)
 }
 
 /// Continuous alpha as a function of sub-pixel y. Each logical row r
