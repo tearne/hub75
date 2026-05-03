@@ -193,7 +193,7 @@ Aggregation factors `[1, 2, 2, 2, 2, 2, 2, 2]`. At production master rate 500 ms
 
 [Up](#display)
 
-Decides which columns each metric occupies on the panel and in what order. CPU cores are interleaved between the other metrics, left to right across the 32-column logical canvas: Disk write, CPU0, Disk read, CPU1, RAM, CPU2, Net down, CPU3, Net up. Each CPU core acts as a visual separator between the non-CPU metrics, and CPU activity is visible across the whole width of the panel rather than clustered.
+Decides which columns each metric occupies on the panel and in what order. CPU cores are interleaved between the other metrics, left to right across the 32-column logical canvas: Disk write, CPU0, Disk read, CPU1, Net down, CPU2, Net up, CPU3, RAM. Each CPU core acts as a visual separator between the non-CPU metrics, and CPU activity is visible across the whole width of the panel rather than clustered. RAM sits at the end so that under the hourly screen-burn shift the wrap-adjacency is RAM↔Disk write rather than Net↔Disk.
 
 **Detail**
 
@@ -205,11 +205,11 @@ Column widths per metric, left to right (CPU cores interleaved between non-CPU m
 | CPU0       | 3–6   | 4     |
 | Disk read  | 7–9   | 3     |
 | CPU1       | 10–13 | 4     |
-| RAM        | 14–17 | 4     |
-| CPU2       | 18–21 | 4     |
-| Net down   | 22–24 | 3     |
-| CPU3       | 25–28 | 4     |
-| Net up     | 29–31 | 3     |
+| Net down   | 14–16 | 3     |
+| CPU2       | 17–20 | 4     |
+| Net up     | 21–23 | 3     |
+| CPU3       | 24–27 | 4     |
+| RAM        | 28–31 | 4     |
 
 CPU cores at width 4 (more visual presence per core); Disk and Net halves at width 3; RAM at width 4. Sums to 32. CPU cores carry more emphasis since on a desktop workload the four cores are the most active and most differentiated metrics.
 
