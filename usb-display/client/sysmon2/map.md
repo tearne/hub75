@@ -18,8 +18,7 @@ sysmon2
 ├ Display
 │ ├ Projection
 │ │ ├ Row Rendering
-│ │ ├ Slate
-│ │ └ Time Compression
+│ │ └ Bands
 │ └ Presentation
 └ Modes
 ```
@@ -46,38 +45,31 @@ Four metrics, one per Pi-5 core. Each metric is one-dimensional: a single "total
 
 **Detail**
 
-Source: `/proc/stat`. Each `cpuN` line gives cumulative jiffies per category since boot; per-sample fractions come from differencing against the previous reading. Sampled at the master sampling rate. Core count discovered at startup.
+Source: `/proc/stat`. Each `cpuN` line gives cumulative jiffies per category since boot; per-sample fractions come from differencing against the previous reading. Sampled at the sampling rate. Core count discovered at startup.
 
 **See also**
 
-- [Slate](#slate) — owns the master sampling rate.
+- [Modes](#modes) — owns the sampling rate.
 
 # RAM
 
 [Up](#devices)
 
-One metric, one-dimensional: committed memory — i.e. memory in use that isn't reclaimable cache or buffers. A fraction in [0, 1] of total system RAM.
-
-RAM is rendered differently from the other metrics: random-dot density encoding (sysmon1-style) rather than centred bar fill, and **no time compression** — the ring is linear, one entry per panel row sliding straight down at one row per sample. To populate the panel meaningfully under linear time, RAM samples slower than the others (multiplier 10): an entry traverses the panel in 64 × 10 master sample periods of wall-clock.
+One metric, one-dimensional: committed memory — memory in use that isn't reclaimable cache or buffers. A fraction in [0, 1] of total system RAM.
 
 **Detail**
 
-Source: `/proc/meminfo`. Computed as `(MemTotal − MemAvailable) / MemTotal`. `MemAvailable` is the kernel's estimate of memory available for new processes, accounting for reclaimable cache; subtracting it from total gives the working set (matches `btop` and `free`'s "used" reading).
-
-Render: each sample produces a width-4 pixel row with `n = max(1, round(value × 4))` random columns lit (column choice deterministic per sample by seed). Each lit pixel's intensity is also scaled by `value`, so dot *count* and dot *brightness* both rise with the metric. Row is pushed onto a 66-entry ring (64 visible + 2 edge). At render time, ring entry at index `i` splats at sub-pixel `y = (i − 1) + t`, with `t` the elapsed-fraction since the last RAM sample.
-
-Multiplier 10: in production (master = 1 s) RAM samples every 10 s; in fast mode (50 ms) every 500 ms. Bottom of panel reaches ~10 min back in production.
+Source: `/proc/meminfo`. Computed as `(MemTotal − MemAvailable) / MemTotal`. `MemAvailable` is the kernel's estimate of memory available for new processes, accounting for reclaimable cache; subtracting it from total gives the working set (matches `btop` and `free`'s "used" reading). Sampled at the sampling rate.
 
 **See also**
 
-- [Slate](#slate) — owns the master sampling rate and per-metric multipliers; also describes RAM's separate ring type.
-- [Time Compression](#time-compression) — applies to all metrics *except* RAM.
+- [Modes](#modes) — owns the sampling rate.
 
 # Disk
 
 [Up](#devices)
 
-Two metrics, each one-dimensional: read (bytes/sec) and write (bytes/sec). Each is sampled at the master sampling rate by differencing cumulative byte counters against the previous reading and dividing by the elapsed interval.
+Two metrics, each one-dimensional: read (bytes/sec) and write (bytes/sec). Each is sampled at the sampling rate by differencing cumulative byte counters against the previous reading and dividing by the elapsed interval.
 
 Read and write each carry their own scale, log-normalised between a near-zero floor and a per-channel running peak. A read-heavy workload therefore doesn't dampen the visibility of write activity, and vice versa.
 
@@ -90,13 +82,13 @@ Log-scale endpoints: floor `MIN_BPS = 1` (1 B/s — anything below normalises to
 **See also**
 
 - [Metric](#metric) — defines per-metric normalisation.
-- [Slate](#slate) — owns the master sampling rate.
+- [Modes](#modes) — owns the sampling rate.
 
 # Network
 
 [Up](#devices)
 
-Two metrics, each one-dimensional: down (bytes/sec received) and up (bytes/sec sent). Each is sampled at the master sampling rate by differencing cumulative byte counters against the previous reading and dividing by the elapsed interval.
+Two metrics, each one-dimensional: down (bytes/sec received) and up (bytes/sec sent). Each is sampled at the sampling rate by differencing cumulative byte counters against the previous reading and dividing by the elapsed interval.
 
 Down and up each carry their own scale, log-normalised between a near-zero floor and a per-channel running peak — same scheme as Disk.
 
@@ -109,20 +101,20 @@ Log-scale endpoints: floor `MIN_BPS = 1` (1 B/s). Starting upper end `MAX_FLOOR 
 **See also**
 
 - [Metric](#metric) — defines per-metric normalisation.
-- [Slate](#slate) — owns the master sampling rate.
+- [Modes](#modes) — owns the sampling rate.
 
 # Metric
 
 [Up](#sysmon2)
 
-A single vertical column slice of the display, fed by one stream from a device. Sampled at the master sampling rate. Each metric carries one value (a fraction in [0, 1]) per sample; sysmon2 keeps metrics one-dimensional by construction — finer-grained breakdowns are modelled as additional metrics rather than as dimensions of one.
+A single vertical column slice of the display, fed by one stream from a device. Sampled at the sampling rate. Each metric carries one value (a fraction in [0, 1]) per sample; sysmon2 keeps metrics one-dimensional by construction — finer-grained breakdowns are modelled as additional metrics rather than as dimensions of one.
 
 Each metric carries its own scale. Every sample is normalised into [0, 1] before it enters the rendering pipeline, so a metric's panel intensity is independent of underlying units. CPU and RAM normalise implicitly (already fractions of an interval, or of total memory). Disk read, Disk write, Network down, and Network up each carry an explicit per-metric scale that floats with the maximum value observed for that metric since the application started.
 
 **See also**
 
 - [Devices](#devices) — the four resource categories that contribute the nine metrics.
-- [Slate](#slate) — owns the master sampling rate.
+- [Modes](#modes) — owns the sampling rate.
 
 # Display
 
@@ -136,7 +128,7 @@ Driven over a USB-display protocol via the `hub75-client` crate (shared with the
 
 **Detail**
 
-Render cadence: configurable per Mode, decoupled from the master sampling rate. Each render interval, Projection runs against the current slate to produce one frame buffer.
+A new frame is produced each time a sample is taken — Projection runs once per sampling cycle, immediately after the sample is pushed into the bands.
 
 Rotation: output packing rotates the 32×64 portrait buffer 90° clockwise into the panel's 64×32 native landscape frame. The user's top-of-view edge maps to the panel's right edge; the user's left edge maps to the panel's top. Concretely, logical pixel `(x, y)` in the portrait buffer is written to native pixel `(63 − y, x)` in the wire frame.
 
@@ -144,16 +136,15 @@ Rotation: output packing rotates the 32×64 portrait buffer 90° clockwise into 
 
 [Up](#display)
 [Down](#row-rendering)
-[Down](#slate)
-[Down](#time-compression)
+[Down](#bands)
 
-Maps metric data into panel-coordinate space, in two stages around the slate. **Row rendering** runs once per metric sample and writes a fresh pixel row into that metric's ring on the slate. **Vertical mapping** runs once per render frame, reads every ring entry, and splats it at a continuous sub-pixel `y` position with a vertical-Gaussian kernel into the visible canvas. The slate decouples writes from reads: writes happen at metric cadence, reads at render cadence.
+Maps metric data into panel-coordinate space. **Row rendering** turns a band-row's value and pattern into the panel pixels for its column slice. **Bands** organise each metric's history into a stack of scrolling-displays at increasing aggregation timescales, with patterns flowing across band seams.
 
 # Row Rendering
 
 [Up](#projection)
 
-When a metric is sampled, its current value (a fraction in [0, 1]) is pushed onto its ring on the slate. That's the entire write path — no pixel row is built at this stage. The deterministic conversion from value to pixels happens later, during time compression.
+When a band commits a row, its value and dot pattern are produced by the band-aggregation logic — see [Bands](#bands). Row rendering's job is to turn that `(value, pattern)` pair into pixels in the metric's column slice on the panel: each lit column in the pattern is painted at intensity `value × colour`, integer-aligned to the panel row; unlit columns stay dark.
 
 **Detail**
 
@@ -172,67 +163,37 @@ The CPU colour is shared across all four cores; cores are visually distinguished
 
 **See also**
 
-- [Slate](#slate) — receives the value.
+- [Bands](#bands) — produces the `(value, pattern)` pairs that this node renders.
 
-# Time Compression
-
-[Up](#projection)
-
-Once per render frame, every ring entry is splatted onto the visible canvas at a continuous sub-pixel `y` with a vertical-Gaussian kernel. Each entry slides downward by `1/N(r)` of a row per sample period when in window `r` — newer entries (shallow windows) slide fast, older ones (deep windows) slide slow, producing the slowdown.
-
-For an entry at ring index `a`, in window `r` with position `w = a − WINDOW_STARTS[r]`:
-
-```
-y = (r − 1) + (w + t) / WINDOW_SIZES[r]
-```
-
-`t` is the elapsed-fraction since the last sample (0→1 between samples; resets as `w` increments, so `y` is continuous through window transitions).
-
-**Bar fill.** For value `v` in a slice of width `W`, the bar is centred at the slice's middle with length `L = v × W`. Per-column intensity is `overlap × v × colour` — both spatially shorter *and* dimmer at low values.
-
-Brightness compensation `α = 0.5 / N(r)^0.65` keeps bottom rows readable; many entries pile up there.
-
-**Detail**
-
-Vertical Gaussian σ ≈ 0.7, kernel half-width 1 panel row.
-
-LED floor: sub-threshold pixels scaled so dominant channel reaches `MIN_LED = 8` (preserves colour ratio).
-
-**See also**
-
-- [Slate](#slate) — provides the rings being splatted.
-
-# Slate
+# Bands
 
 [Up](#projection)
 
-Nine per-metric ring buffers. Eight (CPU × 4, Disk read/write, Net down/up) are the same length and store scalar values; their pixel pattern is computed during time compression. The ninth — RAM — is special: it stores pre-laid pixel rows (random dots) and has length 66 (one per panel row + edges) for its linear-time mapping. The slate isn't one rectangular thing — it's a per-metric assembly.
+Each metric's column slice is split into 8 stacked **bands**, each at a different aggregation timescale. Band 0 (top) holds raw samples; deeper bands aggregate 2 evicted rows from the band above into one of their own. Cumulative sample count per row doubles down the panel: 1, 2, 4, 8, 16, 32, 64, 128 at bands 0–7.
 
-Fast metrics push new entries often; slow metrics rarely. So a slow metric's ring covers more wall-clock at the bottom of the panel.
+Within a band, rendering is a standard scrolling display — 8 rows, newest at top, oldest evicted off the bottom. Each band has an aggregation accumulator that collects upstream values until the band's factor (2 for bands 1–7; 1 for band 0) is reached.
 
-> [!IMPORTANT] Time aligns at the top (every newest entry is "now") but diverges down the panel: at the bottom, CPU reaches ~30 s back while Disk reaches several minutes. Slow metrics gain visual weight by scrolling slowly — same shape as `sysmon`.
+At commit, the new row's value is the mean of the accumulated values. Its dot pattern starts from the **latest non-blank** entry in the accumulator (the basis), and is adjusted to match the new value's target dot count:
+
+- When the count matches the basis, the pattern flows through unchanged — no randomness.
+- When dots need to be added, the new columns are drawn from elsewhere in the accumulator's history, biased toward the columns most frequently lit there (consensus across recent rows).
+- When dots need to be removed, the dropped column is biased toward those least frequently lit (outliers from the basis).
+
+So **patterns stay continuous at band seams** for steady metrics; under change, basis columns are preserved where possible and additions/removals are guided by the whole accumulator, not just the latest entry.
 
 **Detail**
 
-Master sampling rate: set by [Modes](#modes) (production = 1 s, fast = 50 ms). CPU samples at this rate; slower metrics sample at integer multiples.
-
-Per-metric multipliers: CPU 1, Net 6, Disk 20, RAM 10. Each metric's effective sample period is `master_rate × multiplier`. RAM is slower than its underlying-source allows because its linear-time mapping (one ring entry per panel row) needs samples spread over a panel-traversal-worth of wall-clock to read meaningfully.
-
-Ring length: ~3,340 entries each — the sum of `ceil(1.10^(r-1))` across 66 rows (64 visible + 2 edge). Same length for every metric regardless of sample period.
+Aggregation factors `[1, 2, 2, 2, 2, 2, 2, 2]`. At production master rate 500 ms, bottom-of-panel reaches ~17 min back; at fast (50 ms) ~1.7 min.
 
 **See also**
 
-- [Row Rendering](#row-rendering) — writes new entries into the rings.
-- [Time Compression](#time-compression) — reads the rings and splats them onto the visible canvas.
+- [Row Rendering](#row-rendering) — how each band-row's value and pattern become panel pixels.
 
 # Presentation
 
 [Up](#display)
 
-Applies after each metric has been projected into panel-coordinate space. Two responsibilities:
-
-- **Layout.** Decides which columns each metric occupies on the panel and in what order. CPU cores are interleaved between the other metrics, left to right across the 32-column logical canvas: Disk write, CPU0, Disk read, CPU1, RAM, CPU2, Net down, CPU3, Net up. Each CPU core acts as a visual separator between the non-CPU metrics, and CPU activity is visible across the whole width of the panel rather than clustered.
-- **Edge rows.** Maintains hidden rows above the top and below the bottom of the visible canvas so blending operations have well-defined neighbours at the edges. Without these, samples entering or leaving view would cause the topmost and bottommost visible rows to pulsate as their blend partners appeared and disappeared.
+Decides which columns each metric occupies on the panel and in what order. CPU cores are interleaved between the other metrics, left to right across the 32-column logical canvas: Disk write, CPU0, Disk read, CPU1, RAM, CPU2, Net down, CPU3, Net up. Each CPU core acts as a visual separator between the non-CPU metrics, and CPU activity is visible across the whole width of the panel rather than clustered.
 
 **Detail**
 
@@ -252,25 +213,23 @@ Column widths per metric, left to right (CPU cores interleaved between non-CPU m
 
 CPU cores at width 4 (more visual presence per core); Disk and Net halves at width 3; RAM at width 4. Sums to 32. CPU cores carry more emphasis since on a desktop workload the four cores are the most active and most differentiated metrics.
 
-Edge rows: 1 above and 1 below the visible 64 rows (matches `sysmon`). They are conceptual targets in the splat coordinate space — entries with `y` outside `[0, 64)` still get computed but their Gaussian contributions to visible rows fall off naturally, so content sliding into and out of view doesn't pulsate.
-
 # Modes
 
 [Up](#sysmon2)
 
-sysmon2 runs in one of two modes selected at startup. The pipeline is identical between them — same data sources, same rendering, same ring length — only the cadence differs.
+sysmon2 runs in one of two modes selected at startup. The pipeline is identical between them — same data sources, same rendering — only the sampling rate differs. Sampling and rendering happen in lockstep: one frame is produced per sample.
 
-- **Production (default)** — slow: master sampling rate 1 s, render 5 fps. Top of panel moves a row every second; bottom of CPU column reaches ~20 min back. Roughly a quarter of fast's CPU because per-frame work scales with render rate, not sampling rate. Top motion stays smooth because 5 frames span one row of motion.
-
-- **Fast** — for development: master sampling rate 50 ms, render 20 fps. Top moves a row every 50 ms; bottom of CPU column reaches ~30 s back. Quick visual feedback when tuning or chasing artefacts. Uses the most CPU.
+- **Production (default)** — slow: sampling rate 500 ms. Bottom of panel reaches ~17 min back.
+- **Fast** — for development: sampling rate 50 ms. Bottom of panel reaches ~1.7 min back. Quicker visual feedback when tuning. Uses more CPU.
 
 Selected via CLI flag `-f` for fast; absence of the flag selects production. Production is the default so the systemd-installed binary runs at low CPU without further flags.
 
 **Detail**
 
-| Mode | Master sampling rate | Render rate | Render interval | Bottom-of-CPU history |
-|------|-------------|-------------|------------------|-----------------------|
-| production (default) | 1 s | 5 fps  | 200 ms | ~20 min |
-| fast (`-f`)          | 50 ms | 20 fps | 50 ms | ~30 s   |
+| Mode                 | Sampling rate | Bottom-of-panel history |
+|----------------------|---------------|-------------------------|
+| production (default) | 500 ms        | ~17 min                 |
+| fast (`-f`)          | 50 ms         | ~1.7 min                |
 
-Why this works: the ring length is fixed by the window scheme and stays the same in both modes. Slowing the master sampling rate stretches each ring entry's wall-clock coverage; slowing the render rate drops per-second rendering work. Sub-pixel sliding stays smooth because the elapsed-fraction `t` advances the same 0→1 over one sample period regardless of rate, so each render frame interpolates to a sensible intermediate position.
+Bottom-of-panel depth = `sampling_rate × Σᵢ (band_heightᵢ × cumulative_factorᵢ)` = `sampling_rate × 8 × (1 + 2 + 4 + … + 128)` = `sampling_rate × 2040`.
+

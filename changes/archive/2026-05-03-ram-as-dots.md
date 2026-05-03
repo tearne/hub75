@@ -11,3 +11,15 @@ Take RAM out of the unified time-compressed bar pipeline and give it its own vis
 The combination gives RAM a distinct "rain falling at constant speed, peppered with dots" look that contrasts with the smooth slowdown of the other metrics — visually marks RAM as a different kind of thing.
 
 Cadence agile.
+
+## Conclusion
+
+What shipped:
+
+- New `RamRing` in `slate.rs` storing pre-laid pixel rows (one per panel row + edges, 66 total). Distinct from the other metrics' scalar-value `Ring`.
+- `RAM_MULTIPLIER` 6 → 10 (RAM samples every 10 master periods).
+- New rendering path in `projection.rs`: `splat_ram_ring` and `render_ram_row` — random-dot density encoding (`n = max(1, round(v × W))` columns lit, deterministic by seed) with each lit pixel's intensity scaled by `value` so both dot *count* and per-dot *brightness* rise with the metric.
+- RAM splat uses linear time mapping: ring entry at index `i` is at sub-pixel `y = (i − 1) + t`. No window-aggregation curve.
+- Map's RAM and Slate nodes updated to describe RAM's separate pipeline.
+
+Constraint discovered (motivates the next change): without time compression, RAM only reaches ~10 min back at the bottom of the panel — much shallower than CPU's ~55 min. The next change explores re-enabling time compression for RAM while preserving dot character.
