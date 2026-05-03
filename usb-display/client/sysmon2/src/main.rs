@@ -1,14 +1,14 @@
 //! sysmon2 — first-principles HUB75 system monitor.
 //!
-//! See `map.md` for the conceptual model. This vertical slice
-//! implements only the four CPU-core metrics; other metrics are stubbed
-//! and will follow once the architecture is validated on the panel.
+//! See `map.md` for the conceptual model.
 
 mod cpu;
 mod display;
 mod presentation;
 mod projection;
+mod ram;
 mod slate;
+mod throughput;
 
 use std::error::Error;
 use std::sync::{Arc, Mutex};
@@ -18,9 +18,11 @@ use std::time::{Duration, Instant};
 use hub75_client::Hub75Client;
 
 use crate::cpu::CpuSampler;
-use crate::presentation::CORE_COUNT;
-use crate::projection::{CPU_COLOUR, render_canvas, render_row};
-use crate::slate::Slate;
+use crate::presentation::{CORE_COUNT, RAM_WIDTH};
+use crate::projection::{RAM_COLOUR, render_canvas, render_ram_row};
+use crate::ram::RamSampler;
+use crate::slate::{DISK_MULTIPLIER, NET_MULTIPLIER, RAM_MULTIPLIER, Slate};
+use crate::throughput::{ThroughputSampler, disk_sampler, net_sampler};
 
 #[derive(Clone, Copy)]
 struct Mode {
@@ -68,16 +70,28 @@ fn spawn_sampler(slate: Arc<Mutex<Slate>>, master_sampling_rate: Duration) {
             Ok(s) => s,
             Err(e) => { eprintln!("CPU sampler init failed: {e}"); return; }
         };
+        let ram = RamSampler::new();
+        let mut disk = match disk_sampler() {
+            Ok(s) => s,
+            Err(e) => { eprintln!("Disk sampler init failed: {e}"); return; }
+        };
+        let mut net = match net_sampler() {
+            Ok(s) => s,
+            Err(e) => { eprintln!("Net sampler init failed: {e}"); return; }
+        };
         let mut sample_no: u64 = 0;
         loop {
             thread::sleep(master_sampling_rate);
             sample_no = sample_no.wrapping_add(1);
-            push_cpu_sample(&mut cpu, sample_no, &slate);
+            push_cpu_sample(&mut cpu, &slate);
+            if sample_no % RAM_MULTIPLIER  as u64 == 0 { push_ram_sample(&ram, sample_no, &slate); }
+            if sample_no % NET_MULTIPLIER  as u64 == 0 { push_net_sample(&mut net, &slate); }
+            if sample_no % DISK_MULTIPLIER as u64 == 0 { push_disk_sample(&mut disk, &slate); }
         }
     });
 }
 
-fn push_cpu_sample(cpu: &mut CpuSampler, sample_no: u64, slate: &Mutex<Slate>) {
+fn push_cpu_sample(cpu: &mut CpuSampler, slate: &Mutex<Slate>) {
     let busy = match cpu.sample() {
         Ok(b) => b,
         Err(e) => { eprintln!("CPU sample failed: {e}"); return; }
@@ -85,17 +99,49 @@ fn push_cpu_sample(cpu: &mut CpuSampler, sample_no: u64, slate: &Mutex<Slate>) {
     let now = Instant::now();
     let mut slate = slate.lock().unwrap();
     for core_idx in 0..CORE_COUNT {
-        let seed = seed_for(sample_no, core_idx);
-        let row = render_row(busy[core_idx], slate.cpu[core_idx].width(), CPU_COLOUR, seed);
-        slate.cpu[core_idx].push(row);
+        slate.cpu[core_idx].push(busy[core_idx]);
     }
     slate.last_cpu_sample_at = now;
 }
 
-fn seed_for(sample_no: u64, core_idx: usize) -> u32 {
-    let lo = sample_no as u32;
-    let hi = (sample_no >> 32) as u32;
-    lo ^ hi.rotate_left(13) ^ ((core_idx as u32).wrapping_mul(0x9e3779b9))
+fn push_ram_sample(ram: &RamSampler, sample_no: u64, slate: &Mutex<Slate>) {
+    let used = match ram.sample() {
+        Ok(v) => v,
+        Err(e) => { eprintln!("RAM sample failed: {e}"); return; }
+    };
+    let now = Instant::now();
+    let row = render_ram_row(used, RAM_WIDTH, RAM_COLOUR, ram_seed(sample_no));
+    let mut slate = slate.lock().unwrap();
+    slate.ram.push(row);
+    slate.last_ram_sample_at = now;
+}
+
+fn ram_seed(sample_no: u64) -> u32 {
+    (sample_no as u32) ^ ((sample_no >> 32) as u32).rotate_left(13) ^ 0xA1B2C3D4
+}
+
+fn push_disk_sample(disk: &mut ThroughputSampler, slate: &Mutex<Slate>) {
+    let now = Instant::now();
+    let (read_frac, write_frac) = match disk.sample(now) {
+        Ok(v) => v,
+        Err(e) => { eprintln!("Disk sample failed: {e}"); return; }
+    };
+    let mut slate = slate.lock().unwrap();
+    slate.disk_read.push(read_frac);
+    slate.disk_write.push(write_frac);
+    slate.last_disk_sample_at = now;
+}
+
+fn push_net_sample(net: &mut ThroughputSampler, slate: &Mutex<Slate>) {
+    let now = Instant::now();
+    let (rx_frac, tx_frac) = match net.sample(now) {
+        Ok(v) => v,
+        Err(e) => { eprintln!("Net sample failed: {e}"); return; }
+    };
+    let mut slate = slate.lock().unwrap();
+    slate.net_down.push(rx_frac);
+    slate.net_up.push(tx_frac);
+    slate.last_net_sample_at = now;
 }
 
 fn render_loop(panel: &mut Hub75Client, slate: Arc<Mutex<Slate>>, mode: Mode) -> Result<(), Box<dyn Error>> {
@@ -103,8 +149,7 @@ fn render_loop(panel: &mut Hub75Client, slate: Arc<Mutex<Slate>>, mode: Mode) ->
         let frame_start = Instant::now();
         let canvas = {
             let slate = slate.lock().unwrap();
-            let t = elapsed_fraction(frame_start, slate.last_cpu_sample_at, mode.master_sampling_rate);
-            render_canvas(&slate, t)
+            render_canvas(&slate, mode.master_sampling_rate, frame_start)
         };
         let frame = display::rotate_to_panel(&canvas);
         panel.send_frame_rgb(&frame)?;
@@ -112,10 +157,4 @@ fn render_loop(panel: &mut Hub75Client, slate: Arc<Mutex<Slate>>, mode: Mode) ->
             thread::sleep(rest);
         }
     }
-}
-
-fn elapsed_fraction(now: Instant, since: Instant, period: Duration) -> f32 {
-    if now <= since { return 0.0; }
-    let elapsed = now.duration_since(since).as_secs_f32();
-    (elapsed / period.as_secs_f32()).clamp(0.0, 1.0)
 }
