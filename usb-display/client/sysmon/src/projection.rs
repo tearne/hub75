@@ -16,18 +16,21 @@ use crate::presentation::{
 };
 use crate::slate::{Pixel, Slate};
 
-/// Per-metric base colours, carried over from the original (pre-sysmon2)
-/// sysmon palette. Hand-tuned RGB triplets — the high-saturation variant
-/// renders these as-is; the low-saturation variant desaturates each
-/// toward its own grey mid-point.
-const METRIC_COLOURS: [Pixel; 6] = [
+/// Two palettes for A/B comparison. `main.rs` flips between them every
+/// wall-clock second. `PALETTE_A` is the baseline (currently the
+/// original pre-sysmon2 hand-tuned RGB palette); `PALETTE_B` is the
+/// experimental knob — edit it, rebuild, eyeball the alternation.
+pub const PALETTE_A: [Pixel; 6] = [
     /* DiskWrite */ [240,  50,  50], // red
-    /* DiskRead  */ [255, 175,  40], // amber-gold
-    /* NetDown   */ [ 40, 220,  90], // green
-    /* Cpu       */ [ 50, 230, 230], // cyan
-    /* NetUp     */ [200, 240,  40], // yellow-lime
-    /* Ram       */ [230,  60, 170], // magenta
+    /* DiskRead  */ [236, 156,  19], // amber (hue 38°, sat 0.85, light 0.50)
+    /* NetDown   */ [ 16, 198,  68], // green (hue 137°, sat 0.85, light 0.42)
+    /* Cpu       */ [ 11,  98, 218], // blue (hue 215°, sat 0.90, light 0.45)
+    /* NetUp     */ [175, 215,  15], // lime (hue 72°, sat 0.87, light 0.45)
+    /* Ram       */ [135,  25, 190], // bluer purple (hue 280°, sat 0.77, light 0.42)
 ];
+
+#[allow(dead_code)]
+pub const PALETTE_B: [Pixel; 6] = PALETTE_A;
 
 const IDX_DISK_WRITE: usize = 0;
 const IDX_DISK_READ:  usize = 1;
@@ -41,8 +44,6 @@ const IDX_RAM:        usize = 5;
 /// while still recognisably the metric's colour.
 const SATURATION_LOW: f32 = 0.4;
 
-const MIN_LED: f32 = 8.0;
-
 /// Toggle: when true, fill each metric's column slice with a dim
 /// background between dots. When false, unlit pixels stay black.
 const BACKGROUND_ENABLED: bool = false;
@@ -53,8 +54,8 @@ const BACKGROUND_DIM: f32 = 0.04;
 /// Pair of colour variants for a metric: `(below_mean = low_sat, above_mean = high_sat)`.
 type ColourPair = (Pixel, Pixel);
 
-fn variants_for(metric_idx: usize) -> ColourPair {
-    let high = METRIC_COLOURS[metric_idx];
+fn variants_for(metric_idx: usize, palette: &[Pixel; 6]) -> ColourPair {
+    let high = palette[metric_idx];
     (desaturate(high, SATURATION_LOW), high)
 }
 
@@ -67,45 +68,75 @@ fn desaturate(rgb: Pixel, factor: f32) -> Pixel {
     ]
 }
 
-pub fn render_canvas(slate: &Slate, shift: usize) -> Vec<Pixel> {
-    let mut accumulator = vec![[0.0f32; 3]; LOGICAL_WIDTH * LOGICAL_HEIGHT];
-
-    let cpu_pair = variants_for(IDX_CPU);
-    for core_idx in 0..CORE_COUNT {
-        render_metric(&slate.cpu[core_idx], cpu_core_left(core_idx), cpu_pair, &mut accumulator);
-    }
-    render_metric(&slate.ram,        RAM_LEFT,        variants_for(IDX_RAM),        &mut accumulator);
-    render_metric(&slate.disk_read,  DISK_READ_LEFT,  variants_for(IDX_DISK_READ),  &mut accumulator);
-    render_metric(&slate.disk_write, DISK_WRITE_LEFT, variants_for(IDX_DISK_WRITE), &mut accumulator);
-    render_metric(&slate.net_down,   NET_DOWN_LEFT,   variants_for(IDX_NET_DOWN),   &mut accumulator);
-    render_metric(&slate.net_up,     NET_UP_LEFT,     variants_for(IDX_NET_UP),     &mut accumulator);
-
-    let canvas = pack_to_u8(&accumulator);
-    if shift == 0 { canvas } else { shift_horizontal(canvas, shift) }
+/// Owns the reusable buffers for the render pipeline. Allocate once
+/// at startup; call `.render(...)` each frame to fill the panel-shaped
+/// frame buffer in place. `&[Pixel]` returned borrows `self.frame`.
+pub struct Renderer {
+    canvas: Vec<Pixel>,
+    frame: Vec<Pixel>,
 }
 
-/// Slide the canvas horizontally by `shift` columns (with wrap) in
-/// logical space. Used for screen-burn mitigation — once per hour
-/// of wall-clock the shift advances by 1 column, so over time every
-/// LED experiences every metric.
-fn shift_horizontal(canvas: Vec<Pixel>, shift: usize) -> Vec<Pixel> {
-    let s = shift % LOGICAL_WIDTH;
-    if s == 0 { return canvas; }
-    let mut out = vec![[0u8; 3]; canvas.len()];
-    for y in 0..LOGICAL_HEIGHT {
-        for x in 0..LOGICAL_WIDTH {
-            let src_x = (x + LOGICAL_WIDTH - s) % LOGICAL_WIDTH;
-            out[y * LOGICAL_WIDTH + x] = canvas[y * LOGICAL_WIDTH + src_x];
+impl Renderer {
+    pub fn new() -> Self {
+        let pixels = LOGICAL_WIDTH * LOGICAL_HEIGHT;
+        Self {
+            canvas: vec![[0u8; 3]; pixels],
+            frame: vec![[0u8; 3]; pixels],
         }
     }
-    out
+
+    pub fn render(
+        &mut self,
+        slate: &Slate,
+        shift: usize,
+        palette: &[Pixel; 6],
+        label: char,
+    ) -> &[Pixel] {
+        self.canvas.fill([0u8; 3]);
+
+        let cpu_pair = variants_for(IDX_CPU, palette);
+        for core_idx in 0..CORE_COUNT {
+            render_metric(&slate.cpu[core_idx], cpu_core_left(core_idx), cpu_pair, &mut self.canvas);
+        }
+        render_metric(&slate.ram,        RAM_LEFT,        variants_for(IDX_RAM,        palette), &mut self.canvas);
+        render_metric(&slate.disk_read,  DISK_READ_LEFT,  variants_for(IDX_DISK_READ,  palette), &mut self.canvas);
+        render_metric(&slate.disk_write, DISK_WRITE_LEFT, variants_for(IDX_DISK_WRITE, palette), &mut self.canvas);
+        render_metric(&slate.net_down,   NET_DOWN_LEFT,   variants_for(IDX_NET_DOWN,   palette), &mut self.canvas);
+        render_metric(&slate.net_up,     NET_UP_LEFT,     variants_for(IDX_NET_UP,     palette), &mut self.canvas);
+
+        draw_label(&mut self.canvas, label);
+        crate::display::shift_and_rotate(&self.canvas, &mut self.frame, shift);
+        &self.frame
+    }
+}
+
+/// Draw 'A' or 'B' as a 3×5 white pixel block at bottom-right of the
+/// logical canvas. Pre-rotation, so coordinates are portrait
+/// (LOGICAL_WIDTH cols × LOGICAL_HEIGHT rows).
+fn draw_label(canvas: &mut [Pixel], label: char) {
+    let glyph: [u8; 5] = match label {
+        'A' => [0b010, 0b101, 0b111, 0b101, 0b101],
+        'B' => [0b110, 0b101, 0b110, 0b101, 0b110],
+        _   => return,
+    };
+    let left = LOGICAL_WIDTH - 3;
+    let top  = LOGICAL_HEIGHT - 5;
+    for (row_idx, bits) in glyph.iter().enumerate() {
+        for col in 0..3 {
+            let lit = bits & (1 << (2 - col)) != 0;
+            if lit {
+                let idx = (top + row_idx) * LOGICAL_WIDTH + (left + col);
+                canvas[idx] = [255, 255, 255];
+            }
+        }
+    }
 }
 
 fn render_metric(
     bands: &MetricBands,
     left: usize,
     colours: ColourPair,
-    accumulator: &mut [[f32; 3]],
+    canvas: &mut [Pixel],
 ) {
     let mut band_top = 0;
     for band_idx in 0..BAND_COUNT {
@@ -114,7 +145,7 @@ fn render_metric(
             let row = band.rows[row_idx];
             let panel_y = band_top + row_idx;
             if panel_y >= LOGICAL_HEIGHT { break; }
-            paint_row(row, panel_y, left, bands.width, colours, accumulator);
+            paint_row(row, panel_y, left, bands.width, colours, canvas);
         }
         band_top += band.height;
     }
@@ -130,7 +161,7 @@ fn paint_row(
     left: usize,
     width: usize,
     colours: ColourPair,
-    accumulator: &mut [[f32; 3]],
+    canvas: &mut [Pixel],
 ) {
     let has_dots = row.value > 0.0 && row.pattern != 0;
     let (cool, warm) = colours;
@@ -138,34 +169,23 @@ fn paint_row(
     for col in 0..width {
         let bit = 1u8 << col;
         let lit = has_dots && (row.pattern & bit) != 0;
-        let (intensity, colour) = if lit {
-            (1.0, dot_colour)
+        let pixel = if lit {
+            dot_colour
         } else if BACKGROUND_ENABLED {
-            (BACKGROUND_DIM, dot_colour)
+            scale_pixel(dot_colour, BACKGROUND_DIM)
         } else {
             continue;
         };
         let idx = panel_y * LOGICAL_WIDTH + (left + col);
-        for c in 0..3 {
-            accumulator[idx][c] += colour[c] as f32 * intensity;
-        }
+        canvas[idx] = pixel;
     }
 }
 
-fn pack_to_u8(accumulator: &[[f32; 3]]) -> Vec<Pixel> {
-    accumulator.iter().map(|p| lift_pixel(*p)).collect()
-}
-
-
-/// If a pixel is sub-threshold but non-zero, scale so its dominant
-/// channel reaches `MIN_LED`, with other channels scaling
-/// proportionally to preserve the colour ratio.
-fn lift_pixel(p: [f32; 3]) -> Pixel {
-    let max = p[0].max(p[1]).max(p[2]);
-    let scale = if max > 0.0 && max < MIN_LED { MIN_LED / max } else { 1.0 };
+#[allow(dead_code)]
+fn scale_pixel(rgb: Pixel, factor: f32) -> Pixel {
     [
-        (p[0] * scale).clamp(0.0, 255.0) as u8,
-        (p[1] * scale).clamp(0.0, 255.0) as u8,
-        (p[2] * scale).clamp(0.0, 255.0) as u8,
+        (rgb[0] as f32 * factor).clamp(0.0, 255.0) as u8,
+        (rgb[1] as f32 * factor).clamp(0.0, 255.0) as u8,
+        (rgb[2] as f32 * factor).clamp(0.0, 255.0) as u8,
     ]
 }

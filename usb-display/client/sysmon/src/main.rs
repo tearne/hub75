@@ -20,7 +20,8 @@ use hub75_client::Hub75Client;
 
 use crate::cpu::CpuSampler;
 use crate::presentation::{CORE_COUNT, LOGICAL_WIDTH};
-use crate::projection::render_canvas;
+#[allow(unused_imports)]
+use crate::projection::{PALETTE_A, PALETTE_B, Renderer};
 use crate::ram::RamSampler;
 use crate::slate::Slate;
 use crate::throughput::{ThroughputSampler, disk_sampler, net_sampler};
@@ -33,7 +34,7 @@ struct Mode {
 
 const DEFAULT_MODE: Mode = Mode {
     name: "prod",
-    sampling_rate: Duration::from_millis(500),
+    sampling_rate: Duration::from_millis(1000),
 };
 
 const FAST: Mode = Mode {
@@ -58,14 +59,29 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let started_at = Instant::now();
     let initial_shift = random_initial_shift();
+    let mut renderer = Renderer::new();
     loop {
         let cycle_start = Instant::now();
         sample_all(&mut cpu, &ram, &mut disk, &mut net, &mut slate);
-        let elapsed_quarter_hours = started_at.elapsed().as_secs() / 900;
+        let elapsed_secs = started_at.elapsed().as_secs();
+        let elapsed_quarter_hours = elapsed_secs / 900;
         let shift = (initial_shift + elapsed_quarter_hours as usize) % LOGICAL_WIDTH;
-        let canvas = render_canvas(&slate, shift);
-        let frame = display::rotate_to_panel(&canvas);
-        panel.send_frame_rgb(&frame)?;
+
+        // A/B palette comparison is disabled in production. To enable
+        // (e.g. for tuning a candidate colour change), edit `PALETTE_B`
+        // in `projection.rs`, comment out the next two lines, and
+        // uncomment the block below — and consider also disabling the
+        // screen-burn shift above. See `map.md` "A/B Palette Mode".
+        let palette = &PALETTE_A;
+        let label = ' ';
+        // let (palette, label) = if (elapsed_secs / 5) % 2 == 0 {
+        //     (&PALETTE_A, 'A')
+        // } else {
+        //     (&PALETTE_B, 'B')
+        // };
+
+        let frame = renderer.render(&slate, shift, palette, label);
+        panel.send_frame_rgb(frame)?;
         if let Some(rest) = mode.sampling_rate.checked_sub(cycle_start.elapsed()) {
             thread::sleep(rest);
         }
@@ -112,6 +128,9 @@ fn sample_all(
     let now = Instant::now();
     match disk.sample(now) {
         Ok((read_frac, write_frac)) => {
+            // For palette tuning without real disk activity, swap
+            // `read_frac` for `synthetic_fraction(now)` to inject a
+            // pseudo-random fraction. See `map.md` "A/B Palette Mode".
             slate.disk_read.push_sample(read_frac);
             slate.disk_write.push_sample(write_frac);
         }
@@ -124,4 +143,20 @@ fn sample_all(
         }
         Err(e) => eprintln!("Net sample failed: {e}"),
     }
+}
+
+/// Pseudo-random fraction in [0, 1] derived from the sample instant —
+/// hashes the nanosecond component so successive samples don't
+/// correlate. Used as a temporary stand-in for absent disk-read
+/// activity during palette comparison; kept available for future
+/// development sessions. See `map.md` "A/B Palette Mode".
+#[allow(dead_code)]
+fn synthetic_fraction(now: Instant) -> f32 {
+    let nanos = now.elapsed().as_nanos() as u32;
+    let mut x = nanos.wrapping_mul(0x9e3779b9);
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x85ebca6b);
+    x ^= x >> 13;
+    let hashed = x.wrapping_mul(0xc2b2ae35) ^ (x >> 16);
+    (hashed as f32) / (u32::MAX as f32)
 }

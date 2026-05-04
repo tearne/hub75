@@ -4,6 +4,7 @@
 [Down](#metric)
 [Down](#display)
 [Down](#modes)
+[Down](#a-b-palette-mode)
 
 Captures host metrics and renders them as a banded waterfall on the LED panel. Each metric occupies a vertical column slice, with rows aggregated at increasing timescales down the panel.
 
@@ -20,7 +21,8 @@ sysmon
 │ │ ├ Row Rendering
 │ │ └ Bands
 │ └ Presentation
-└ Modes
+├ Modes
+└ A/B Palette Mode
 ```
 
 # Devices
@@ -232,4 +234,12 @@ Selected via CLI flag `-f` for fast; absence of the flag selects production. Pro
 | fast (`-f`)          | 50 ms         | ~1.7 min                |
 
 Bottom-of-panel depth = `sampling_rate × Σᵢ (band_heightᵢ × cumulative_factorᵢ)` = `sampling_rate × 8 × (1 + 2 + 4 + … + 128)` = `sampling_rate × 2040`.
+
+# A/B Palette Mode
+
+[Up](#sysmon)
+
+A development aid for tuning the metric palette. Defines two compile-time `[Pixel; 6]` constants — `PALETTE_A` (production) and `PALETTE_B` (experimental candidate). When enabled, the active palette flips every 5 seconds of wall-clock and a small `A`/`B` glyph in the bottom-right of the panel says which is currently rendering. By alternating, side-by-side colour comparisons become possible without rebuilding twice.
+
+The mechanism is committed but disabled by default. Three toggle points sit in `main.rs` as commented-out blocks: the palette/label selection, the screen-burn-shift override (usually disabled during comparison so palette positions stay still), and a `synthetic_fraction` injection that gives Disk read pseudo-random activity when the host has no real disk I/O. A glyph helper `draw_label` in `projection.rs` paints the A/B marker in white at the bottom-right corner of the logical canvas pre-rotation.
 

@@ -12,8 +12,8 @@
 //! randomness, giving visual continuity at the seams.
 
 pub const BAND_COUNT: usize = 3;
-pub const BAND_HEIGHTS: [usize; BAND_COUNT] = [22, 21, 21];
-pub const MAX_BAND_HEIGHT: usize = 22;
+pub const BAND_HEIGHTS: [usize; BAND_COUNT] = [32, 20, 12];
+pub const MAX_BAND_HEIGHT: usize = 32;
 
 const AGGREGATION_FACTORS: [u32; BAND_COUNT] = [1, 12, 12];
 const MAX_FACTOR: usize = 12;

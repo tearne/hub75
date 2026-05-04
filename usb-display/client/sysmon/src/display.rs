@@ -6,20 +6,23 @@ use hub75_client::{HEIGHT as PANEL_H, WIDTH as PANEL_W};
 use crate::presentation::{LOGICAL_HEIGHT, LOGICAL_WIDTH};
 use crate::slate::Pixel;
 
-/// Logical pixel `(x, y)` in the portrait canvas maps to native pixel
-/// `(W - 1 - y, x)` in the panel's landscape frame — a 90° clockwise
-/// rotation that puts the user's top-of-view at the panel's right edge.
-pub fn rotate_to_panel(canvas: &[Pixel]) -> Vec<Pixel> {
+/// Apply screen-burn shift and 90° clockwise rotation in a single
+/// pass. Logical pixel `(lx, ly)` from `canvas`, after shifting `lx`
+/// by `shift` columns (with wrap), is written to native panel pixel
+/// `(W - 1 - ly, lx_shifted)`. One pass over the canvas, no
+/// intermediate buffer.
+pub fn shift_and_rotate(canvas: &[Pixel], frame: &mut [Pixel], shift: usize) {
     debug_assert_eq!(canvas.len(), LOGICAL_WIDTH * LOGICAL_HEIGHT);
+    debug_assert_eq!(frame.len(), PANEL_W * PANEL_H);
     debug_assert_eq!(PANEL_W, LOGICAL_HEIGHT);
     debug_assert_eq!(PANEL_H, LOGICAL_WIDTH);
-    let mut out = vec![[0u8; 3]; PANEL_W * PANEL_H];
+    let s = shift % LOGICAL_WIDTH;
     for ly in 0..LOGICAL_HEIGHT {
+        let px = PANEL_W - 1 - ly;
+        let row_start = ly * LOGICAL_WIDTH;
         for lx in 0..LOGICAL_WIDTH {
-            let px = PANEL_W - 1 - ly;
-            let py = lx;
-            out[py * PANEL_W + px] = canvas[ly * LOGICAL_WIDTH + lx];
+            let lx_shifted = (lx + s) % LOGICAL_WIDTH;
+            frame[lx_shifted * PANEL_W + px] = canvas[row_start + lx];
         }
     }
-    out
 }
