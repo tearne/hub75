@@ -1,39 +1,46 @@
 //! Banded rendering with inter-band pattern flow.
 //!
-//! The panel is split into 4 horizontal bands, each at a different
-//! aggregation timescale. Data flows downward from band to band: band
-//! 0 receives raw samples; deeper bands aggregate factor-many evicted
-//! rows from the band above. At commit time, the new band row's *dot
-//! pattern* is derived from the latest non-blank pattern in the
-//! accumulator (the row that just aged out of the band above),
-//! adjusted up or down to match the new aggregated value's target
-//! dot count. Patterns therefore tend to "flow through" band
-//! boundaries rather than reset to fresh randomness, giving visual
-//! continuity at the seams.
+//! The panel is split into 3 horizontal bands of unequal heights,
+//! each at a different aggregation timescale. Data flows downward
+//! from band to band: band 0 receives raw samples; deeper bands
+//! aggregate factor-many evicted rows from the band above. At commit
+//! time, the new band row's *dot pattern* is derived from the latest
+//! non-blank pattern in the accumulator (the row that just aged out
+//! of the band above), adjusted up or down to match the new
+//! aggregated value's target dot count. Patterns therefore tend to
+//! "flow through" band boundaries rather than reset to fresh
+//! randomness, giving visual continuity at the seams.
 
-pub const BAND_COUNT:  usize = 8;
-pub const BAND_HEIGHT: usize = 8;
+pub const BAND_COUNT: usize = 3;
+pub const BAND_HEIGHTS: [usize; BAND_COUNT] = [22, 21, 21];
+pub const MAX_BAND_HEIGHT: usize = 22;
 
-const AGGREGATION_FACTORS: [u32; BAND_COUNT] = [1, 2, 2, 2, 2, 2, 2, 2];
-const MAX_FACTOR: usize = 2;
+const AGGREGATION_FACTORS: [u32; BAND_COUNT] = [1, 12, 12];
+const MAX_FACTOR: usize = 12;
 
 #[derive(Clone, Copy, Default)]
 pub struct BandRow {
     pub value: f32,
     pub pattern: u8,
+    /// Whether this row's value sat at-or-above its band's
+    /// pre-commit rolling mean. Fixed when the row was committed
+    /// and carried unchanged as the row slides through the band.
+    pub above_mean: bool,
 }
 
 pub struct Band {
-    pub rows: [BandRow; BAND_HEIGHT],
+    pub rows: [BandRow; MAX_BAND_HEIGHT],
+    pub height: usize,
     accumulator: [BandRow; MAX_FACTOR],
     accumulator_count: u32,
     factor: u32,
 }
 
 impl Band {
-    fn new(factor: u32) -> Self {
+    fn new(factor: u32, height: usize) -> Self {
         Self {
-            rows: [BandRow::default(); BAND_HEIGHT],
+            rows: [BandRow::default(); MAX_BAND_HEIGHT],
+            height,
             accumulator: [BandRow::default(); MAX_FACTOR],
             accumulator_count: 0,
             factor,
@@ -66,13 +73,15 @@ impl Band {
         let basis = latest_non_blank_pattern(&self.accumulator[..count]);
         let pattern = flow_pattern(basis, &self.accumulator[..count], width, target_n, seed);
 
+        let above_mean = mean >= prior_mean(&self.rows[..self.height]);
+
         self.accumulator_count = 0;
 
-        let evicted = self.rows[BAND_HEIGHT - 1];
-        for i in (1..BAND_HEIGHT).rev() {
+        let evicted = self.rows[self.height - 1];
+        for i in (1..self.height).rev() {
             self.rows[i] = self.rows[i - 1];
         }
-        self.rows[0] = BandRow { value: mean, pattern };
+        self.rows[0] = BandRow { value: mean, pattern, above_mean };
         Some(evicted)
     }
 }
@@ -85,15 +94,16 @@ pub struct MetricBands {
 
 impl MetricBands {
     pub fn new(width: usize) -> Self {
-        let bands = std::array::from_fn(|i| Band::new(AGGREGATION_FACTORS[i]));
+        let bands = std::array::from_fn(|i| Band::new(AGGREGATION_FACTORS[i], BAND_HEIGHTS[i]));
         Self { bands, width, commit_count: 0 }
     }
 
     pub fn push_sample(&mut self, value: f32) {
         self.commit_count = self.commit_count.wrapping_add(1);
-        // Raw sample has no upstream pattern; band 0 always falls back
-        // to fresh random because its accumulator entry has pattern=0.
-        let mut upstream = Some(BandRow { value, pattern: 0 });
+        // Raw upstream row never hits the panel directly — it's just
+        // an accumulator entry feeding band 0. `above_mean` is unused
+        // until the row is committed downstream, where it's recomputed.
+        let mut upstream = Some(BandRow { value, pattern: 0, above_mean: false });
         for (band_idx, band) in self.bands.iter_mut().enumerate() {
             let Some(row) = upstream else { break };
             let seed = mix32(self.commit_count as u32, band_idx as u32);
@@ -121,6 +131,11 @@ fn latest_non_blank_pattern(entries: &[BandRow]) -> u8 {
         if entry.pattern != 0 { return entry.pattern; }
     }
     0
+}
+
+fn prior_mean(rows: &[BandRow]) -> f32 {
+    let sum: f32 = rows.iter().map(|r| r.value).sum();
+    sum / rows.len() as f32
 }
 
 pub fn dot_count(value: f32, width: usize) -> usize {

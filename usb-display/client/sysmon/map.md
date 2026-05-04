@@ -1,14 +1,14 @@
-# sysmon2
+# sysmon
 
 [Down](#devices)
 [Down](#metric)
 [Down](#display)
 [Down](#modes)
 
-A fresh take on the HUB75 panel system monitor. Captures host metrics and renders them as a waterfall-with-slowdown on the LED panel. Built from first principles alongside the existing `sysmon` crate.
+Captures host metrics and renders them as a banded waterfall on the LED panel. Each metric occupies a vertical column slice, with rows aggregated at increasing timescales down the panel.
 
 ```
-sysmon2
+sysmon
 ├ Devices
 │ ├ CPU
 │ ├ RAM
@@ -25,13 +25,13 @@ sysmon2
 
 # Devices
 
-[Up](#sysmon2)
+[Up](#sysmon)
 [Down](#cpu)
 [Down](#ram)
 [Down](#disk)
 [Down](#network)
 
-The four host resource categories rendered on the panel: CPU, RAM, Disk, Network. Each device contributes one or more **metrics** — a metric is a single vertical column slice of the display. Across the four devices, sysmon2 renders **nine metrics** in total. Every metric is a single value (one fraction in [0, 1] per sample); finer breakdowns become more metrics, not dimensions of one metric.
+The four host resource categories rendered on the panel: CPU, RAM, Disk, Network. Each device contributes one or more **metrics** — a metric is a single vertical column slice of the display. Across the four devices, sysmon renders **nine metrics** in total. Every metric is a single value (one fraction in [0, 1] per sample); finer breakdowns become more metrics, not dimensions of one metric.
 
 **See also**
 
@@ -105,9 +105,9 @@ Log-scale endpoints: floor `MIN_BPS = 1` (1 B/s). Starting upper end `MAX_FLOOR 
 
 # Metric
 
-[Up](#sysmon2)
+[Up](#sysmon)
 
-A single vertical column slice of the display, fed by one stream from a device. Sampled at the sampling rate. Each metric carries one value (a fraction in [0, 1]) per sample; sysmon2 keeps metrics one-dimensional by construction — finer-grained breakdowns are modelled as additional metrics rather than as dimensions of one.
+A single vertical column slice of the display, fed by one stream from a device. Sampled at the sampling rate. Each metric carries one value (a fraction in [0, 1]) per sample; sysmon keeps metrics one-dimensional by construction — finer-grained breakdowns are modelled as additional metrics rather than as dimensions of one.
 
 Each metric carries its own scale. Every sample is normalised into [0, 1] before it enters the rendering pipeline, so a metric's panel intensity is independent of underlying units. CPU and RAM normalise implicitly (already fractions of an interval, or of total memory). Disk read, Disk write, Network down, and Network up each carry an explicit per-metric scale that floats with the maximum value observed for that metric since the application started.
 
@@ -118,11 +118,11 @@ Each metric carries its own scale. Every sample is normalised into [0, 1] before
 
 # Display
 
-[Up](#sysmon2)
+[Up](#sysmon)
 [Down](#projection)
 [Down](#presentation)
 
-A 64×32 HUB75 LED matrix, mounted in portrait — sysmon2 renders into a 32-wide × 64-tall logical canvas, with a single 90° rotation applied at output time to match the panel's native orientation. All rendering work upstream of that final rotation works in the portrait frame.
+A 64×32 HUB75 LED matrix, mounted in portrait — sysmon renders into a 32-wide × 64-tall logical canvas, with a single 90° rotation applied at output time to match the panel's native orientation. All rendering work upstream of that final rotation works in the portrait frame.
 
 Driven over a USB-display protocol via the `hub75-client` crate (shared with the existing `sysmon`). The host emits u8 RGB per pixel; brightness and gamma handling live downstream in the firmware, so values written into the canvas reach the panel without further shaping.
 
@@ -215,9 +215,9 @@ CPU cores at width 4 (more visual presence per core); Disk and Net halves at wid
 
 # Modes
 
-[Up](#sysmon2)
+[Up](#sysmon)
 
-sysmon2 runs in one of two modes selected at startup. The pipeline is identical between them — same data sources, same rendering — only the sampling rate differs. Sampling and rendering happen in lockstep: one frame is produced per sample.
+sysmon runs in one of two modes selected at startup. The pipeline is identical between them — same data sources, same rendering — only the sampling rate differs. Sampling and rendering happen in lockstep: one frame is produced per sample.
 
 - **Production (default)** — slow: sampling rate 500 ms. Bottom of panel reaches ~17 min back.
 - **Fast** — for development: sampling rate 50 ms. Bottom of panel reaches ~1.7 min back. Quicker visual feedback when tuning. Uses more CPU.

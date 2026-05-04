@@ -1,932 +1,127 @@
-//! At-a-glance system monitor for Linux hosts on the 64×32 panel rotated
-//! into a 32×64 portrait view.
+//! sysmon — HUB75 system monitor.
 //!
-//! Four vertical strips, left-to-right: Disk, CPU, RAM, Network.
-//! Newest data appears at the top of each strip and slides downward as
-//! samples age. CPU is split into 4 thin vertical sub-strips (one per Pi 5
-//! core) so single-threaded workloads pinning a core are visible. Disk and
-//! Net split horizontally into read/write and down/up halves.
-//!
-//! Each metric scrolls at its own pace — CPU is jumpy, RAM and Network
-//! are moderate, Disk is the calmest. Disk and network use a fixed log
-//! scale so quiet idle still shows and bursts don't peg out. Each lit dot
-//! is a soft 5×5 Gaussian blob, blurred in both axes, so adjacent dots
-//! within a strip overlap into a continuous lit field.
-//!
-//! Tested on Raspberry Pi 5; should work on any aarch64 Debian-based Linux
-//! host with USB CDC support and the matching HUB75 firmware on a Pico.
-//! See README.md for install instructions.
-//!
-//! Run:  cargo run --release  (or install via the deb package)
+//! See `map.md` for the conceptual model.
 
-#[cfg(not(target_os = "linux"))]
-fn main() {
-    eprintln!("sysmon_linux is Linux-only — it reads /proc directly.");
-}
+mod bands;
+mod cpu;
+mod display;
+mod oklch;
+mod presentation;
+mod projection;
+mod ram;
+mod slate;
+mod throughput;
 
-#[cfg(target_os = "linux")]
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    linux::run()
-}
-
-#[cfg(target_os = "linux")]
-mod linux {
-
-use hub75_client::{Hub75Client, WIDTH, HEIGHT};
-use std::collections::VecDeque;
 use std::error::Error;
-use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
-// ── Geometry ───────────────────────────────────────────────────────
+use hub75_client::Hub75Client;
 
-/// Logical canvas — physical 64×32 rotated 90° CCW into 32×64 portrait.
-const LW: usize = 32;
-const LH: usize = 64;
+use crate::cpu::CpuSampler;
+use crate::presentation::{CORE_COUNT, LOGICAL_WIDTH};
+use crate::projection::render_canvas;
+use crate::ram::RamSampler;
+use crate::slate::Slate;
+use crate::throughput::{ThroughputSampler, disk_sampler, net_sampler};
 
-/// Strip layout: vertical columns, left-to-right.
-const DISK_LEFT:  usize = 0;
-const DISK_WIDTH: usize = 6;
-const CPU_LEFT:   usize = 6;
-const CPU_WIDTH:  usize = 12;
-const RAM_LEFT:   usize = 18;
-const RAM_WIDTH:  usize = 8;
-const NET_LEFT:   usize = 26;
-const NET_WIDTH:  usize = 6;
-
-/// CPU column subdivided into 4 vertical sub-strips, one per Pi 5 core.
-/// Each sub-strip runs the full canvas height; the per-core dot density
-/// reads as that core's load. No separator gap between cores.
-const CORE_COUNT: usize = 4;
-const CORE_WIDTH: usize = 3;
-
-/// Disk and Net columns split horizontally into two equal halves
-/// (no separator gap; colour distinguishes the channels).
-const LAYER_HALF_COLS: usize = 3;
-
-const _: () = assert!(DISK_WIDTH == LAYER_HALF_COLS * 2, "disk strip must split evenly");
-const _: () = assert!(NET_WIDTH  == LAYER_HALF_COLS * 2, "net strip must split evenly");
-const _: () = assert!(DISK_LEFT + DISK_WIDTH + CPU_WIDTH + RAM_WIDTH + NET_WIDTH == LW,
-                      "strip widths must fill the canvas");
-const _: () = assert!(CORE_WIDTH * CORE_COUNT == CPU_WIDTH, "CPU sub-strips must fill the column");
-
-/// Continuous time compression: every canvas row gets its own window into
-/// a single shared buffer of raw samples. Top rows cover one or two raw
-/// samples (fast motion); bottom rows cover many (slow motion). Window
-/// sizes grow geometrically with row, so dots appear to slow down as they
-/// fall — without any visible breakpoints between bands.
-///
-/// `TOTAL_ROWS` includes one imaginary row above the canvas (logical row
-/// 0, slide-in for the newest sample) and one below (logical row `LH+1`,
-/// slide-out for the oldest visible sample). Visible canvas rows 0..LH-1
-/// correspond to logical rows 1..=LH.
-const TOTAL_ROWS: usize = LH + 2;
-
-/// Geometric base for window growth, scaled by 100 to keep the const-fn
-/// computation in integer arithmetic. 106 / 100 = 1.06 → window size at
-/// logical row r (for visible rows) is `ceil(1.06^(r-1))`.
-const BLUR_BASE_NUM: u64 = 106;
-const BLUR_BASE_DEN: u64 = 100;
-
-const WINDOW_SIZES:  [usize; TOTAL_ROWS] = compute_window_sizes();
-const WINDOW_STARTS: [usize; TOTAL_ROWS] = compute_window_starts();
-const BUFFER_LEN:    usize               = WINDOW_STARTS[TOTAL_ROWS - 1] + WINDOW_SIZES[TOTAL_ROWS - 1];
-
-const fn compute_window_sizes() -> [usize; TOTAL_ROWS] {
-    let mut sizes = [1usize; TOTAL_ROWS];
-    // sizes[0] = 1 (imaginary above), sizes[TOTAL_ROWS - 1] = 1 (imaginary below).
-    // For visible rows logical_row = 1..=LH, window size = ceil(BASE^(logical_row - 1))
-    // computed in fixed-point integer arithmetic to keep this const-evaluable.
-    let scale: u64 = 1_000_000_000;
-    let mut val: u64 = scale;          // BASE^0 = 1
-    let mut k = 0;
-    while k < LH {
-        sizes[1 + k] = ((val + scale - 1) / scale) as usize;
-        val = val * BLUR_BASE_NUM / BLUR_BASE_DEN;
-        k += 1;
-    }
-    sizes
+#[derive(Clone, Copy)]
+struct Mode {
+    name: &'static str,
+    sampling_rate: Duration,
 }
 
-const fn compute_window_starts() -> [usize; TOTAL_ROWS] {
-    let sizes = compute_window_sizes();
-    let mut starts = [0usize; TOTAL_ROWS];
-    let mut total = 0usize;
-    let mut r = 0;
-    while r < TOTAL_ROWS {
-        starts[r] = total;
-        total += sizes[r];
-        r += 1;
-    }
-    starts
-}
+const DEFAULT_MODE: Mode = Mode {
+    name: "prod",
+    sampling_rate: Duration::from_millis(500),
+};
 
-/// Upper bound on shuffle-buffer length, large enough for the widest
-/// strip's dot-position pool (CPU at 14).
-const STRIP_COLS_MAX: usize = 16;
+const FAST: Mode = Mode {
+    name: "fast",
+    sampling_rate: Duration::from_millis(50),
+};
 
-// ── Per-metric tick periods and phases ─────────────────────────────
-//
-// CPU samples every tick; slower metrics push only every Nth tick, so each
-// gets its own scroll speed. Multipliers are relative to the user-set
-// `--update`, so changing `-u` rescales the whole panel proportionally.
-//
-// Phases stagger the slow metrics so they never push on the same tick.
+fn main() -> Result<(), Box<dyn Error>> {
+    let mode = parse_mode_arg();
+    let mut slate = Slate::new();
+    let mut cpu = CpuSampler::new()?;
+    let ram = RamSampler::new();
+    let mut disk = disk_sampler()?;
+    let mut net = net_sampler()?;
+    let mut panel = Hub75Client::open_auto()?;
 
-const PERIOD_RAM:  u64 = 6;
-const PERIOD_NET:  u64 = 6;
-const PERIOD_DISK: u64 = 20;
+    println!(
+        "sysmon [{}] connected. Sampling rate {} ms. Ctrl+C to stop.",
+        mode.name,
+        mode.sampling_rate.as_millis(),
+    );
 
-const PHASE_RAM:  u64 = 0;
-const PHASE_NET:  u64 = 4;
-const PHASE_DISK: u64 = 11;
-
-// ── Colour palettes ────────────────────────────────────────────────
-//
-// Each rendered metric carries a low/high pair: the dot's colour is
-// linearly interpolated between them by the same fraction that drives
-// dot count. Sustained high usage paints in the high-end colour;
-// sustained low usage paints in the low-end. This adds a
-// hue/brightness axis on top of the existing dot-density axis, which
-// matters most in the lower rows where many samples sum into one row
-// and per-sample density distinctions otherwise wash out.
-
-// Spectrum spread: red → amber → lime → green → cyan → azure → blue
-// → magenta. CPU clusters its three sub-shades in the blue band; RAM
-// owns magenta; DISK occupies the warm side; NET occupies green.
-const CPU_USER_LOW:    [u8; 3] = [10, 65, 70];     // dim teal-grey
-const CPU_USER_HIGH:   [u8; 3] = [50, 230, 230];   // bright cyan
-const CPU_SYSTEM_LOW:  [u8; 3] = [15, 40, 70];     // dim slate
-const CPU_SYSTEM_HIGH: [u8; 3] = [60, 150, 240];   // azure blue
-const CPU_IOWAIT_LOW:  [u8; 3] = [15, 20, 80];     // dim navy
-const CPU_IOWAIT_HIGH: [u8; 3] = [60, 80, 240];    // saturated deep blue
-
-const RAM_USED_LOW:    [u8; 3] = [60, 20, 75];     // dim violet
-const RAM_USED_HIGH:   [u8; 3] = [230, 60, 170];   // bright magenta — truly committed
-#[allow(dead_code)]
-const RAM_BUFFERS:     [u8; 3] = [30, 20, 60];     // dim violet — reclaimable (currently not rendered)
-#[allow(dead_code)]
-const RAM_CACHED:      [u8; 3] = [10, 8, 22];      // very dim slate — reclaimable (currently not rendered)
-
-const DISK_READ_LOW:   [u8; 3] = [80, 55, 10];     // dim umber
-const DISK_READ_HIGH:  [u8; 3] = [255, 175, 40];   // amber-gold
-const DISK_WRITE_LOW:  [u8; 3] = [80, 15, 15];     // dim crimson
-const DISK_WRITE_HIGH: [u8; 3] = [240, 50, 50];    // bright red
-
-const NET_DOWN_LOW:    [u8; 3] = [10, 70, 30];     // dim forest
-const NET_DOWN_HIGH:   [u8; 3] = [40, 220, 90];    // bright green
-const NET_UP_LOW:      [u8; 3] = [55, 80, 10];     // dim olive
-const NET_UP_HIGH:     [u8; 3] = [200, 240, 40];   // yellow-lime
-
-// ── Log-scale endpoints for unbounded throughput metrics ───────────
-
-// Per-channel log-scale endpoints. The MIN is the "anything below is
-// invisible" floor (1 KB/s — values lower than this contribute zero).
-// The MAX is the *minimum* upper bound: the actual scale max is
-// `max(buffer_peak, MAX_FLOOR)`, so quiet periods don't auto-expand the
-// scale into noise but bursty periods scale up to fit. As bursts scroll
-// out of the visible buffer, the scale relaxes back.
-const DISK_READ_LOG_MIN:        f32 = 1_000.0;
-const DISK_READ_LOG_MAX_FLOOR:  f32 = 1_000_000.0;       // 1 MB/s
-const DISK_WRITE_LOG_MIN:       f32 = 1_000.0;
-const DISK_WRITE_LOG_MAX_FLOOR: f32 = 1_000_000.0;
-
-const NET_DOWN_LOG_MIN:         f32 = 1_000.0;
-const NET_DOWN_LOG_MAX_FLOOR:   f32 = 1_000_000.0;
-const NET_UP_LOG_MIN:           f32 = 1_000.0;
-const NET_UP_LOG_MAX_FLOOR:     f32 = 1_000_000.0;
-
-// ── Update interval bounds ─────────────────────────────────────────
-
-const MIN_UPDATE_MS:     u64 = 33;       // ~30 fps ceiling
-const MAX_UPDATE_MS:     u64 = 10_000;   // one frame per 10 s floor
-const DEFAULT_UPDATE_MS: u64 = 1_000;
-
-// ── Render-rate and smoothing constants ────────────────────────────
-
-const RENDER_FPS:           u64 = 20;
-const RENDER_INTERVAL:      Duration = Duration::from_millis(1000 / RENDER_FPS);
-/// Gaussian kernel for the dot splat. `BLUR_HALF_PIX` sets the integer
-/// iteration range (pixels checked on each side of the dot's centre);
-/// `BLUR_SIGMA` sets the Gaussian standard deviation. Truncation at
-/// `BLUR_HALF_PIX` clips the long tail; with σ ≈ 1.0 and half-pix = 2, the
-/// weight at the boundary is ~0.14 (visible but small).
-const BLUR_HALF_PIX: i32 = 1;
-const BLUR_SIGMA:    f32 = 0.7;
-
-// ── Run ────────────────────────────────────────────────────────────
-
-pub fn run() -> Result<(), Box<dyn Error>> {
-    let args = parse_args();
-    let interval = Duration::from_millis(args.update_ms);
-    let snapshot = start_sampler(interval);
-    let mut client = open_panel(args.port.as_deref())?;
-    println!("Connected. Update interval {} ms. Ctrl+C to stop.", args.update_ms);
-    render_loop(&mut client, snapshot, interval)
-}
-
-struct Args {
-    port: Option<String>,
-    update_ms: u64,
-}
-
-fn parse_args() -> Args {
-    let mut it = std::env::args().skip(1);
-    let mut port: Option<String> = None;
-    let mut update_ms = DEFAULT_UPDATE_MS;
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "-u" | "--update" => {
-                let raw = it.next().unwrap_or_else(|| die("--update needs a millisecond value"));
-                let parsed: u64 = raw.parse().unwrap_or_else(|_| die(&format!("invalid --update value: {raw}")));
-                update_ms = parsed.clamp(MIN_UPDATE_MS, MAX_UPDATE_MS);
-                if parsed != update_ms {
-                    eprintln!("note: clamped --update to {update_ms} ms (range {MIN_UPDATE_MS}–{MAX_UPDATE_MS})");
-                }
-            }
-            "-h" | "--help" => die_help(),
-            other if other.starts_with('-') => die(&format!("unknown flag: {other}")),
-            other => port = Some(other.to_string()),
-        }
-    }
-    Args { port, update_ms }
-}
-
-fn die(msg: &str) -> ! {
-    eprintln!("sysmon_linux: {msg}");
-    std::process::exit(2);
-}
-
-fn die_help() -> ! {
-    eprintln!("Usage: sysmon_linux [PORT] [-u|--update MS]");
-    eprintln!("  PORT          serial port (default: auto-detect)");
-    eprintln!("  -u, --update  update interval in ms ({MIN_UPDATE_MS}–{MAX_UPDATE_MS}, default {DEFAULT_UPDATE_MS})");
-    std::process::exit(0);
-}
-
-fn open_panel(port: Option<&str>) -> Result<Hub75Client, Box<dyn Error>> {
-    match port {
-        Some(p) => Ok(Hub75Client::open(p)?),
-        None    => Ok(Hub75Client::open_auto()?),
-    }
-}
-
-fn render_loop(
-    client: &mut Hub75Client,
-    snapshot: Arc<Mutex<Snapshot>>,
-    interval: Duration,
-) -> Result<(), Box<dyn Error>> {
-    let interval_secs    = interval.as_secs_f32();
-    let cpu_period_secs  = interval_secs;
-    let ram_period_secs  = PERIOD_RAM  as f32 * interval_secs;
-    let disk_period_secs = PERIOD_DISK as f32 * interval_secs;
-    let net_period_secs  = PERIOD_NET  as f32 * interval_secs;
-
+    let started_at = Instant::now();
+    let initial_shift = random_initial_shift();
     loop {
-        let frame_start = Instant::now();
-
-        let snap = snapshot.lock().unwrap().clone();
-        let now  = Instant::now();
-        let cpu_t  = elapsed_fraction(now, snap.cpu_at,  cpu_period_secs);
-        let ram_t  = elapsed_fraction(now, snap.ram_at,  ram_period_secs);
-        let disk_t = elapsed_fraction(now, snap.disk_at, disk_period_secs);
-        let net_t  = elapsed_fraction(now, snap.net_at,  net_period_secs);
-
-        let mut canvas = [[0u16; 3]; LW * LH];
-        draw_disk_strip(&mut canvas, &snap.disk, disk_t);
-        draw_cpu_strip(&mut canvas,  &snap.cpu,  cpu_t);
-        draw_ram_strip(&mut canvas,  &snap.ram,  ram_t);
-        draw_net_strip(&mut canvas,  &snap.net,  net_t);
-
-        let frame = pack_rotated_cw(&canvas);
-        client.send_frame_rgb(&frame)?;
-
-        if let Some(rest) = RENDER_INTERVAL.checked_sub(frame_start.elapsed()) {
+        let cycle_start = Instant::now();
+        sample_all(&mut cpu, &ram, &mut disk, &mut net, &mut slate);
+        let elapsed_quarter_hours = started_at.elapsed().as_secs() / 900;
+        let shift = (initial_shift + elapsed_quarter_hours as usize) % LOGICAL_WIDTH;
+        let canvas = render_canvas(&slate, shift);
+        let frame = display::rotate_to_panel(&canvas);
+        panel.send_frame_rgb(&frame)?;
+        if let Some(rest) = mode.sampling_rate.checked_sub(cycle_start.elapsed()) {
             thread::sleep(rest);
         }
     }
 }
 
-fn elapsed_fraction(now: Instant, since: Instant, period_secs: f32) -> f32 {
-    if period_secs <= 0.0 { return 0.0; }
-    (now.duration_since(since).as_secs_f32() / period_secs).clamp(0.0, 1.0)
+/// Default mode is production (slow, lower CPU). `-f` selects fast
+/// (development) — quicker scroll for visual tuning at the cost of CPU.
+fn parse_mode_arg() -> Mode {
+    if std::env::args().skip(1).any(|a| a == "-f") { FAST } else { DEFAULT_MODE }
 }
 
-// ── Snapshot of latest sampled state ───────────────────────────────
-
-#[derive(Clone)]
-struct Snapshot {
-    cpu:     VecDeque<CpuSample>,
-    ram:     VecDeque<RamSample>,
-    disk:    VecDeque<IoSample>,
-    net:     VecDeque<IoSample>,
-    cpu_at:  Instant,
-    ram_at:  Instant,
-    disk_at: Instant,
-    net_at:  Instant,
+/// Pick a random starting column offset for the screen-burn shift.
+/// Different boots start at different positions in the 32-hour cycle,
+/// so per-LED aging is averaged across reboots too. Seeded from
+/// wall-clock nanoseconds — no proper RNG needed.
+fn random_initial_shift() -> usize {
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    (nanos as usize) % LOGICAL_WIDTH
 }
 
-impl Default for Snapshot {
-    fn default() -> Self {
-        let now = Instant::now();
-        Snapshot {
-            cpu: VecDeque::new(),
-            ram: VecDeque::new(),
-            disk: VecDeque::new(),
-            net: VecDeque::new(),
-            cpu_at: now,
-            ram_at: now,
-            disk_at: now,
-            net_at: now,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Default)]
-struct CpuSample {
-    cores: [CoreSample; CORE_COUNT],
-    seed:  u32,
-}
-
-#[derive(Clone, Copy, Default)]
-struct CoreSample {
-    user:   f32,    // fraction of interval 0..1
-    system: f32,
-    iowait: f32,
-}
-
-#[derive(Clone, Copy, Default)]
-struct RamSample {
-    composition: RamComposition,
-    seed: u32,
-}
-
-#[derive(Clone, Copy, Default)]
-struct IoSample {
-    a_bps: f32,     // read for disk, rx for network
-    b_bps: f32,     // write for disk, tx for network
-    seed: u32,
-}
-
-#[derive(Clone, Copy, Default)]
-#[allow(dead_code)]
-struct RamComposition {
-    used_kb:    u64,
-    buffers_kb: u64,    // currently not rendered (reclaimable)
-    cached_kb:  u64,    // currently not rendered (reclaimable)
-    total_kb:   u64,
-}
-
-// ── Sampler thread ─────────────────────────────────────────────────
-
-fn start_sampler(interval: Duration) -> Arc<Mutex<Snapshot>> {
-    let snapshot = Arc::new(Mutex::new(Snapshot::default()));
-    let snapshot_writer = Arc::clone(&snapshot);
-    thread::spawn(move || sample_loop(snapshot_writer, interval));
-    snapshot
-}
-
-fn sample_loop(snapshot: Arc<Mutex<Snapshot>>, interval: Duration) {
-    let mut prev_cpu       = read_cpu_times_all().unwrap_or_default();
-    let mut prev_disk      = read_disk_bytes().unwrap_or_default();
-    let mut prev_disk_tick = 0u64;
-    let mut prev_net       = read_net_bytes().unwrap_or_default();
-    let mut prev_net_tick  = 0u64;
-    let mut tick           = 0u64;
-    let interval_secs      = interval.as_secs_f32();
-
-    loop {
-        thread::sleep(interval);
-        tick += 1;
-
-        let cpu_sample = sample_cpu(&mut prev_cpu);
-
-        let ram_sample = (tick % PERIOD_RAM == PHASE_RAM).then(|| RamSample {
-            composition: read_ram_composition().unwrap_or_default(),
-            seed: next_seed(),
-        });
-
-        let disk_sample = (tick % PERIOD_DISK == PHASE_DISK).then(|| {
-            let elapsed = (tick - prev_disk_tick) as f32 * interval_secs;
-            let s = sample_io(&mut prev_disk, read_disk_bytes, elapsed);
-            prev_disk_tick = tick;
-            s
-        });
-
-        let net_sample = (tick % PERIOD_NET == PHASE_NET).then(|| {
-            let elapsed = (tick - prev_net_tick) as f32 * interval_secs;
-            let s = sample_io(&mut prev_net, read_net_bytes, elapsed);
-            prev_net_tick = tick;
-            s
-        });
-
-        let push_at = Instant::now();
-        let mut s = snapshot.lock().unwrap();
-        push_history(&mut s.cpu, cpu_sample, BUFFER_LEN);
-        s.cpu_at = push_at;
-        if let Some(r) = ram_sample  { push_history(&mut s.ram,  r, BUFFER_LEN); s.ram_at  = push_at; }
-        if let Some(d) = disk_sample { push_history(&mut s.disk, d, BUFFER_LEN); s.disk_at = push_at; }
-        if let Some(n) = net_sample  { push_history(&mut s.net,  n, BUFFER_LEN); s.net_at  = push_at; }
-    }
-}
-
-/// Newest sample at index 0; oldest at the back. Pop from the back when
-/// the buffer reaches its cap.
-fn push_history<T>(buf: &mut VecDeque<T>, v: T, cap: usize) {
-    if buf.len() == cap { buf.pop_back(); }
-    buf.push_front(v);
-}
-
-fn sample_cpu(prev: &mut [CpuTimes; CORE_COUNT]) -> CpuSample {
-    let now = read_cpu_times_all().unwrap_or(*prev);
-    let mut cores = [CoreSample::default(); CORE_COUNT];
-    for i in 0..CORE_COUNT {
-        let n = now[i];
-        let p = prev[i];
-        let dtotal = n.total().saturating_sub(p.total()).max(1) as f32;
-        cores[i] = CoreSample {
-            user:   (n.user.saturating_sub(p.user) + n.nice.saturating_sub(p.nice)) as f32 / dtotal,
-            system: (n.system.saturating_sub(p.system)
-                   + n.irq.saturating_sub(p.irq)
-                   + n.softirq.saturating_sub(p.softirq)) as f32 / dtotal,
-            iowait: n.iowait.saturating_sub(p.iowait) as f32 / dtotal,
-        };
-    }
-    *prev = now;
-    CpuSample { cores, seed: next_seed() }
-}
-
-/// Hash a monotonic counter through `mix32` so consecutive seeds are
-/// uncorrelated.
-fn next_seed() -> u32 {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
-    mix32(0xa3c59ac3, COUNTER.fetch_add(1, Ordering::Relaxed))
-}
-
-fn sample_io<F>(prev: &mut (u64, u64), reader: F, elapsed: f32) -> IoSample
-where
-    F: Fn() -> std::io::Result<(u64, u64)>,
-{
-    let fresh = reader().unwrap_or(*prev);
-    let sample = IoSample {
-        a_bps: fresh.0.saturating_sub(prev.0) as f32 / elapsed.max(0.001),
-        b_bps: fresh.1.saturating_sub(prev.1) as f32 / elapsed.max(0.001),
-        seed:  next_seed(),
-    };
-    *prev = fresh;
-    sample
-}
-
-// ── /proc/stat ─────────────────────────────────────────────────────
-
-#[derive(Clone, Copy, Default)]
-struct CpuTimes {
-    user: u64, nice: u64, system: u64, idle: u64,
-    iowait: u64, irq: u64, softirq: u64, steal: u64,
-}
-
-impl CpuTimes {
-    fn total(&self) -> u64 {
-        self.user + self.nice + self.system + self.idle
-            + self.iowait + self.irq + self.softirq + self.steal
-    }
-}
-
-/// Read per-core `cpuN` lines from `/proc/stat` (skipping the aggregate
-/// `cpu` line). Cores beyond `CORE_COUNT` are silently ignored.
-fn read_cpu_times_all() -> std::io::Result<[CpuTimes; CORE_COUNT]> {
-    let text = std::fs::read_to_string("/proc/stat")?;
-    let mut out = [CpuTimes::default(); CORE_COUNT];
-    for line in text.lines() {
-        let prefix = match line.split_whitespace().next() {
-            Some(p) => p,
-            None    => continue,
-        };
-        let n: usize = match prefix.strip_prefix("cpu") {
-            Some(rest) if !rest.is_empty() => match rest.parse() {
-                Ok(n) if n < CORE_COUNT => n,
-                _ => continue,
-            },
-            _ => continue,
-        };
-        let fields: Vec<u64> = line.split_whitespace()
-            .skip(1)
-            .filter_map(|s| s.parse().ok())
-            .collect();
-        let g = |i: usize| fields.get(i).copied().unwrap_or(0);
-        out[n] = CpuTimes {
-            user: g(0), nice: g(1), system: g(2), idle: g(3),
-            iowait: g(4), irq: g(5), softirq: g(6), steal: g(7),
-        };
-    }
-    Ok(out)
-}
-
-// ── /proc/meminfo ──────────────────────────────────────────────────
-
-fn read_ram_composition() -> std::io::Result<RamComposition> {
-    let text = std::fs::read_to_string("/proc/meminfo")?;
-    let mut total = 0u64;
-    let mut available = 0u64;
-    let mut buffers = 0u64;
-    let mut cached = 0u64;
-    let mut sreclaimable = 0u64;
-    for line in text.lines() {
-        let mut it = line.split_whitespace();
-        let key = it.next().unwrap_or("");
-        let value: u64 = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
-        match key {
-            "MemTotal:"     => total = value,
-            "MemAvailable:" => available = value,
-            "Buffers:"      => buffers = value,
-            "Cached:"       => cached = value,
-            "SReclaimable:" => sreclaimable = value,
-            _ => {}
-        }
-    }
-    let cached_total = cached + sreclaimable;
-    // `total - available` matches btop / `free`'s "used" reading. The
-    // kernel's `MemAvailable` is its best estimate of memory available
-    // for new processes (counting reclaimable cache, minus a watermark
-    // reserve), so subtracting it from total gives the working set.
-    let used = total.saturating_sub(available);
-    Ok(RamComposition {
-        used_kb: used,
-        buffers_kb: buffers,
-        cached_kb: cached_total,
-        total_kb: total,
-    })
-}
-
-// ── /proc/diskstats ────────────────────────────────────────────────
-
-fn read_disk_bytes() -> std::io::Result<(u64, u64)> {
-    let text = std::fs::read_to_string("/proc/diskstats")?;
-    let mut read_sectors = 0u64;
-    let mut write_sectors = 0u64;
-    for line in text.lines() {
-        let f: Vec<&str> = line.split_whitespace().collect();
-        if f.len() < 10 { continue; }
-        let name = f[2];
-        if !is_real_block_device(name) { continue; }
-        read_sectors  += f[5].parse::<u64>().unwrap_or(0);
-        write_sectors += f[9].parse::<u64>().unwrap_or(0);
-    }
-    Ok((read_sectors * 512, write_sectors * 512))
-}
-
-fn is_real_block_device(name: &str) -> bool {
-    !(name.starts_with("loop")
-        || name.starts_with("ram")
-        || name.starts_with("dm-"))
-}
-
-// ── /proc/net/dev ──────────────────────────────────────────────────
-
-fn read_net_bytes() -> std::io::Result<(u64, u64)> {
-    let text = std::fs::read_to_string("/proc/net/dev")?;
-    let mut rx = 0u64;
-    let mut tx = 0u64;
-    for line in text.lines().skip(2) {
-        let mut parts = line.splitn(2, ':');
-        let iface = parts.next().unwrap_or("").trim();
-        let rest  = parts.next().unwrap_or("");
-        if iface == "lo" || iface.is_empty() { continue; }
-        let nums: Vec<u64> = rest.split_whitespace()
-            .filter_map(|s| s.parse().ok())
-            .collect();
-        rx += nums.first().copied().unwrap_or(0);
-        tx += nums.get(8).copied().unwrap_or(0);
-    }
-    Ok((rx, tx))
-}
-
-// ── Drawing primitives ─────────────────────────────────────────────
-
-/// Accumulator canvas — Gaussian splats add into u16 channels; clamped to
-/// u8 when packed to the wire frame.
-type Canvas = [[u16; 3]; LW * LH];
-
-/// Add a 2-D Gaussian dot splat centred on integer column `x` and
-/// sub-pixel row `y_subpix`. The kernel covers ±BLUR_HALF_PIX pixels in
-/// each axis; weight at offset `(dx, dy)` is
-/// `exp(-(dx² + dy²) / (2σ²)) × alpha` (separable: `w(dx) × w(dy)`).
-/// Clips to canvas bounds only — blur extends freely across strip,
-/// sub-strip, and layer boundaries.
-fn splat_dot(canvas: &mut Canvas, x: usize, y_subpix: f32, colour: [u8; 3], alpha: f32) {
-    if alpha <= 0.0 || x >= LW { return; }
-    // Vertical-only Gaussian (motion direction): small kernel softens
-    // sub-pixel sliding without smearing across columns. No horizontal
-    // blur at all — dots stay one pixel wide, sharp on the x axis.
-    let two_sigma_sq = 2.0 * BLUR_SIGMA * BLUR_SIGMA;
-    let cy = y_subpix.round() as i32;
-    for dy in -BLUR_HALF_PIX..=BLUR_HALF_PIX {
-        let py = cy + dy;
-        if py < 0 || py >= LH as i32 { continue; }
-        let py = py as usize;
-        let yd = py as f32 - y_subpix;
-        let weight = (-yd * yd / two_sigma_sq).exp() * alpha;
-        let idx = py * LW + x;
-        for c in 0..3 {
-            let add = (colour[c] as f32 * weight) as u16;
-            canvas[idx][c] = canvas[idx][c].saturating_add(add);
-        }
-    }
-}
-
-/// Light a row at sub-pixel `y_subpix` over `width` candidate column
-/// positions starting at `left`. Each `(count, colour)` segment is
-/// splatted at the next pseudo-random column from a per-sample shuffled
-/// order, so densities sum cleanly and the pattern is stable across
-/// renders for the same sample.
-fn paint_dot_row(
-    canvas: &mut Canvas,
-    y_subpix: f32,
-    left: usize,
-    width: usize,
-    seed: u32,
-    alpha: f32,
-    segments: &[(usize, [u8; 3])],
+fn sample_all(
+    cpu: &mut CpuSampler,
+    ram: &RamSampler,
+    disk: &mut ThroughputSampler,
+    net: &mut ThroughputSampler,
+    slate: &mut Slate,
 ) {
-    let mut shuffled = [0u8; STRIP_COLS_MAX];
-    shuffle_indices(seed, &mut shuffled[..width]);
-    let total: usize = segments.iter().map(|s| s.0).sum::<usize>().min(width);
-    let mut idx = 0;
-    for &(count, colour) in segments {
-        for _ in 0..count {
-            if idx >= total { return; }
-            splat_dot(canvas, left + shuffled[idx] as usize, y_subpix, colour, alpha);
-            idx += 1;
-        }
-    }
-}
-
-fn shuffle_indices(seed: u32, out: &mut [u8]) {
-    let n = out.len();
-    let mut keyed = [(0u32, 0u8); STRIP_COLS_MAX];
-    for r in 0..n {
-        keyed[r] = (mix32(seed, r as u32), r as u8);
-    }
-    keyed[..n].sort_unstable_by_key(|&(p, _)| p);
-    for r in 0..n {
-        out[r] = keyed[r].1;
-    }
-}
-
-fn mix32(a: u32, b: u32) -> u32 {
-    let mut x = a.wrapping_add(b.wrapping_mul(0x9e3779b9));
-    x ^= x >> 16;
-    x = x.wrapping_mul(0x85ebca6b);
-    x ^= x >> 13;
-    x.wrapping_mul(0xc2b2ae35) ^ (x >> 16)
-}
-
-/// Map a fraction in [0, 1] to a dot count over `width` candidate columns.
-/// Any non-zero fraction renders at least one dot, so a barely-active
-/// metric stays visible rather than disappearing under the rounding
-/// threshold (e.g. 5% in an 8-wide strip would otherwise round to 0).
-fn dots_for(fraction: f32, width: usize) -> usize {
-    let f = fraction.clamp(0.0, 1.0);
-    if f == 0.0 { return 0; }
-    ((f * width as f32).round() as usize).max(1)
-}
-
-/// Linearly interpolate per-channel between two RGB anchors. `f` is
-/// clamped to [0, 1]. Used to colour each splat by the same fraction
-/// that drives its dot count.
-fn lerp_rgb(low: [u8; 3], high: [u8; 3], f: f32) -> [u8; 3] {
-    let f = f.clamp(0.0, 1.0);
-    let mix = |a: u8, b: u8| -> u8 {
-        let af = a as f32;
-        let bf = b as f32;
-        (af + (bf - af) * f).round().clamp(0.0, 255.0) as u8
-    };
-    [mix(low[0], high[0]), mix(low[1], high[1]), mix(low[2], high[2])]
-}
-
-/// Map bytes-per-second to a fraction in [0, 1] using log10 between the
-/// given min and max. Each I/O channel has its own min/max so reads and
-/// writes (or down and up) can be normalised independently.
-fn log_fraction(bps: f32, min_bps: f32, max_bps: f32) -> f32 {
-    if bps <= min_bps { return 0.0; }
-    let logged   = bps.log10();
-    let log_min  = min_bps.log10();
-    let log_max  = max_bps.log10();
-    ((logged - log_min) / (log_max - log_min)).clamp(0.0, 1.0)
-}
-
-// ── Strip renderers ────────────────────────────────────────────────
-//
-// Every sample in a metric's buffer is rendered individually at a sub-pixel
-// y position derived from its window assignment. For a sample at buffer
-// index `i`, find the logical row `r` whose window contains `i` (so
-// `WINDOW_STARTS[r] <= i < WINDOW_STARTS[r] + WINDOW_SIZES[r]`) and let
-// `w = i - WINDOW_STARTS[r]` be its position within that window. Then:
-//
-//     y     = (r as f32 - 1.0) + (w as f32 + t) / N(r) as f32
-//     alpha = 1.0 / N(r) as f32
-//
-// The `-1.0` shift puts logical row 0 (imaginary above) off the top of the
-// canvas. As `t` runs 0 → 1, every sample slides forward by `1/N(r)` of a
-// pixel — fast in row 1 (1 px/period) and slow at the bottom (~1/12
-// px/period for `b = 1.04`). Brightness compensation `1/N(r)` keeps
-// summed per-row intensity consistent across the panel.
-
-/// Visit every populated `(sample, logical_row, w_in_window)` triple in
-/// the buffer in window order, calling `f` for each. Stops early if the
-/// buffer hasn't accumulated enough samples to reach a row's window yet.
-fn for_each_window_sample<T>(
-    buffer: &VecDeque<T>,
-    mut f: impl FnMut(&T, usize, usize),
-) {
-    for r in 0..TOTAL_ROWS {
-        for w in 0..WINDOW_SIZES[r] {
-            let i = WINDOW_STARTS[r] + w;
-            match buffer.get(i) {
-                Some(sample) => f(sample, r, w),
-                None => return,
+    match cpu.sample() {
+        Ok(busy) => {
+            for core_idx in 0..CORE_COUNT {
+                slate.cpu[core_idx].push_sample(busy[core_idx]);
             }
         }
+        Err(e) => eprintln!("CPU sample failed: {e}"),
+    }
+    match ram.sample() {
+        Ok(used) => slate.ram.push_sample(used),
+        Err(e) => eprintln!("RAM sample failed: {e}"),
+    }
+    let now = Instant::now();
+    match disk.sample(now) {
+        Ok((read_frac, write_frac)) => {
+            slate.disk_read.push_sample(read_frac);
+            slate.disk_write.push_sample(write_frac);
+        }
+        Err(e) => eprintln!("Disk sample failed: {e}"),
+    }
+    match net.sample(now) {
+        Ok((rx_frac, tx_frac)) => {
+            slate.net_down.push_sample(rx_frac);
+            slate.net_up.push_sample(tx_frac);
+        }
+        Err(e) => eprintln!("Net sample failed: {e}"),
     }
 }
-
-fn window_y(r: usize, w: usize, t: f32) -> f32 {
-    (r as f32 - 1.0) + (w as f32 + t) / WINDOW_SIZES[r] as f32
-}
-
-fn window_alpha(r: usize) -> f32 {
-    // `1/N` gives mathematically uniform per-column expected brightness,
-    // but at sparse activity the top reads as bright spots (high variance)
-    // while the bottom reads as a dim uniform glow — perceived as a
-    // dark-going-down gradient. `1/sqrt(N)` over-corrected, making the
-    // bottom over-saturate. `1/N^0.65` is the compromise: bottom uniform
-    // ≈ top peak, so neither side dominates. Plus a 0.5× global dim and a
-    // halved-again multiplier on the imaginary edge rows.
-    let n = WINDOW_SIZES[r] as f32;
-    let base = if r == 0 || r == TOTAL_ROWS - 1 { 0.1 } else { 0.5 };
-    base / n.powf(0.65)
-}
-
-/// Continuous alpha as a function of sub-pixel y. Each logical row r
-/// spans y in [r-1, r], centred at y = r - 0.5. Linearly interpolates
-/// `window_alpha` between adjacent row centres so a sample's alpha stays
-/// continuous as it slides across logical-row boundaries (at the push
-/// moment a sample's y is unchanged but its `r` advances by one — under
-/// the per-row alpha lookup, that's a discontinuity; here it's not).
-fn alpha_at_y(y: f32) -> f32 {
-    let r_lower = (y + 0.5).floor() as i32;
-    let r_upper = r_lower + 1;
-    let alpha_at = |r: i32| -> f32 {
-        if r < 0 || r >= TOTAL_ROWS as i32 {
-            0.0
-        } else {
-            window_alpha(r as usize)
-        }
-    };
-    let alpha_lower = alpha_at(r_lower);
-    let alpha_upper = alpha_at(r_upper);
-    let y_centre_lower = r_lower as f32 - 0.5;
-    let frac = (y - y_centre_lower).clamp(0.0, 1.0);
-    alpha_lower * (1.0 - frac) + alpha_upper * frac
-}
-
-fn draw_cpu_strip(canvas: &mut Canvas, buffer: &VecDeque<CpuSample>, t: f32) {
-    for_each_window_sample(buffer, |sample, r, w| {
-        let y = window_y(r, w, t);
-        let alpha = alpha_at_y(y);
-        for core_idx in 0..CORE_COUNT {
-            let core_left = CPU_LEFT + core_idx * CORE_WIDTH;
-            let core = sample.cores[core_idx];
-            // All three segments share the same gradient driver: total
-            // core activity. Hue still discriminates the kind of work
-            // (cyan/azure/blue), gradient intensity tracks how busy
-            // the core is overall.
-            let core_busy = (core.user + core.system + core.iowait).clamp(0.0, 1.0);
-            let segments = [
-                (dots_for(core.user,   CORE_WIDTH), lerp_rgb(CPU_USER_LOW,   CPU_USER_HIGH,   core_busy)),
-                (dots_for(core.system, CORE_WIDTH), lerp_rgb(CPU_SYSTEM_LOW, CPU_SYSTEM_HIGH, core_busy)),
-                (dots_for(core.iowait, CORE_WIDTH), lerp_rgb(CPU_IOWAIT_LOW, CPU_IOWAIT_HIGH, core_busy)),
-            ];
-            let core_seed = mix32(sample.seed, core_idx as u32);
-            paint_dot_row(canvas, y, core_left, CORE_WIDTH, core_seed, alpha, &segments);
-        }
-    });
-}
-
-fn draw_ram_strip(canvas: &mut Canvas, buffer: &VecDeque<RamSample>, t: f32) {
-    for_each_window_sample(buffer, |sample, r, w| {
-        let y = window_y(r, w, t);
-        let alpha = alpha_at_y(y);
-        let total = sample.composition.total_kb.max(1) as f32;
-        // Only "used" memory — i.e. truly in-use, not reclaimable.
-        // Matches what htop's "Mem" bar reports as used. Buffers and
-        // cached are reclaimable and treated as available, so they don't
-        // get dots.
-        let used_frac = sample.composition.used_kb as f32 / total;
-        let segments = [
-            (dots_for(used_frac, RAM_WIDTH), lerp_rgb(RAM_USED_LOW, RAM_USED_HIGH, used_frac)),
-        ];
-        paint_dot_row(canvas, y, RAM_LEFT, RAM_WIDTH, sample.seed, alpha, &segments);
-    });
-}
-
-// Disk and Net put their input channel (read / download) on the inner
-// edge of the canvas and their output channel (write / upload) on the
-// outer edge. Since Disk is the leftmost strip, that means write on the
-// left half and read on the right half — opposite of the natural
-// (a_bps, b_bps) field order. Net is the rightmost strip so download
-// already lands on the inner (left) half naturally.
-
-fn draw_disk_strip(canvas: &mut Canvas, buffer: &VecDeque<IoSample>, t: f32) {
-    draw_layered_strip(
-        canvas, DISK_LEFT, LAYER_HALF_COLS, buffer, t,
-        |s| s.b_bps, (DISK_WRITE_LOW, DISK_WRITE_HIGH), DISK_WRITE_LOG_MIN, DISK_WRITE_LOG_MAX_FLOOR, // outer (left): write
-        |s| s.a_bps, (DISK_READ_LOW,  DISK_READ_HIGH),  DISK_READ_LOG_MIN,  DISK_READ_LOG_MAX_FLOOR,  // inner (right): read
-    );
-}
-
-fn draw_net_strip(canvas: &mut Canvas, buffer: &VecDeque<IoSample>, t: f32) {
-    draw_layered_strip(
-        canvas, NET_LEFT, LAYER_HALF_COLS, buffer, t,
-        |s| s.a_bps, (NET_DOWN_LOW, NET_DOWN_HIGH), NET_DOWN_LOG_MIN, NET_DOWN_LOG_MAX_FLOOR, // inner (left): download
-        |s| s.b_bps, (NET_UP_LOW,   NET_UP_HIGH),   NET_UP_LOG_MIN,   NET_UP_LOG_MAX_FLOOR,   // outer (right): upload
-    );
-}
-
-/// Two-channel throughput as two side-by-side layers within one strip.
-/// Each side gets its own pick function, colour, log-scale min, and
-/// log-scale max-floor. The actual scale max for each channel is
-/// `max(channel's buffer peak, that channel's max-floor)`, so the scale
-/// auto-adapts upward to bursts but doesn't shrink below the floor.
-fn draw_layered_strip(
-    canvas: &mut Canvas,
-    left: usize,
-    half_cols: usize,
-    buffer: &VecDeque<IoSample>,
-    t: f32,
-    left_pick:  impl Fn(&IoSample) -> f32,
-    left_gradient: ([u8; 3], [u8; 3]),
-    left_log_min: f32,
-    left_log_max_floor: f32,
-    right_pick: impl Fn(&IoSample) -> f32,
-    right_gradient: ([u8; 3], [u8; 3]),
-    right_log_min: f32,
-    right_log_max_floor: f32,
-) {
-    let buffer_max = |pick: &dyn Fn(&IoSample) -> f32| -> f32 {
-        buffer.iter().map(pick).fold(0.0_f32, f32::max)
-    };
-    let left_max  = buffer_max(&left_pick).max(left_log_max_floor);
-    let right_max = buffer_max(&right_pick).max(right_log_max_floor);
-
-    for_each_window_sample(buffer, |sample, r, w| {
-        let y = window_y(r, w, t);
-        let alpha = alpha_at_y(y);
-        let frac_left  = log_fraction(left_pick(sample),  left_log_min,  left_max);
-        let frac_right = log_fraction(right_pick(sample), right_log_min, right_max);
-        let n_left  = dots_for(frac_left,  half_cols);
-        let n_right = dots_for(frac_right, half_cols);
-        let colour_left  = lerp_rgb(left_gradient.0,  left_gradient.1,  frac_left);
-        let colour_right = lerp_rgb(right_gradient.0, right_gradient.1, frac_right);
-        paint_dot_row(
-            canvas, y, left, half_cols,
-            sample.seed.wrapping_add(0xA1B2C3D4), alpha,
-            &[(n_left, colour_left)],
-        );
-        paint_dot_row(
-            canvas, y, left + half_cols, half_cols,
-            sample.seed.wrapping_add(0x5E6F7081), alpha,
-            &[(n_right, colour_right)],
-        );
-    });
-}
-
-// ── Rotation packing ───────────────────────────────────────────────
-
-/// Map logical 32×64 portrait canvas → physical 64×32 wire frame, clamping
-/// each accumulator channel to 0..=255. CW rotation: physical
-/// (WIDTH-1-ly, lx) ← logical (lx, ly). Despite the user-facing
-/// description being "90° CCW from landscape", this pack is the 180°
-/// rotation of the strict CCW form — needed because the panel is
-/// physically mounted such that the user-visible "top of view" maps to
-/// the original landscape's right edge.
-fn pack_rotated_cw(canvas: &Canvas) -> [[u8; 3]; WIDTH * HEIGHT] {
-    let mut out = [[0u8; 3]; WIDTH * HEIGHT];
-    for ly in 0..LH {
-        for lx in 0..LW {
-            let px  = WIDTH - 1 - ly;
-            let py  = lx;
-            let src = canvas[ly * LW + lx];
-            out[py * WIDTH + px] = [
-                src[0].min(255) as u8,
-                src[1].min(255) as u8,
-                src[2].min(255) as u8,
-            ];
-        }
-    }
-    out
-}
-
-} // mod linux
