@@ -1,6 +1,6 @@
-# usb-display
+# usb-serial
 
-Receives RGB frames from a host computer over USB and displays them on a HUB75 panel. The panel is scanned autonomously by hardware via the [`hub75`](../hub75/) crate; this firmware is just glue between the USB endpoint and the panel.
+Receives RGB frames from a host computer over USB CDC (serial) and displays them on a HUB75 panel. The panel is scanned autonomously by hardware via the [`hub75`](../hub75/) crate; this firmware is just glue between the USB endpoint and the panel.
 
 Setup and flashing: [`SETUP.md`](../SETUP.md), [`FLASHING.md`](../FLASHING.md). See [`hub75/`](../hub75/) for the panel-driver implementations and architecture.
 

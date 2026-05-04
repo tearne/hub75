@@ -1,6 +1,6 @@
 [workspace]
-members = ["learning-examples", "usb-display/firmware", "hub75"]
-exclude = ["usb-display/client/rust", "usb-display/client/sysmon"]
+members = ["learning-examples", "usb-serial/firmware", "usb-drop/firmware", "hub75"]
+exclude = ["usb-serial/client/rust", "usb-serial/client/sysmon"]
 resolver = "2"
 
 [profile.release]

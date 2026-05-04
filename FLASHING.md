@@ -18,7 +18,7 @@ The chained one-liner pattern parenthesises the `cd` so the second command runs 
 For development. Requires a debug probe wired up. Builds, flashes over SWD, streams `defmt` logs back, all in one go.
 
 ```sh
-cd <crate>             # e.g. hub75/, learning-examples/, usb-display/firmware/
+cd <crate>             # e.g. hub75/, learning-examples/, usb-serial/firmware/
 cargo run --release --example <name> [--features <...>]
 ```
 
@@ -33,11 +33,11 @@ For boards without a probe attached. Put the board in BOOTSEL — hold **BOOT** 
   picotool load -v -x -t elf target/thumbv8m.main-none-eabihf/release/examples/<name>
 ```
 
-For the firmware binary in `usb-display/firmware/`, use the binary name instead of `examples/<name>`:
+For the firmware binary in `usb-serial/firmware/`, use the binary name instead of `examples/<name>`:
 
 ```sh
-(cd usb-display/firmware && cargo build --release --features panel-shift-64x32) && \
-  picotool load -v -x -t elf target/thumbv8m.main-none-eabihf/release/usb-display-firmware
+(cd usb-serial/firmware && cargo build --release --features panel-shift-64x32) && \
+  picotool load -v -x -t elf target/thumbv8m.main-none-eabihf/release/usb-serial-firmware
 ```
 
 `picotool` flags:

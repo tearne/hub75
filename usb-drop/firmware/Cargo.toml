@@ -1,0 +1,19 @@
+[package]
+name = "usb-drop-firmware"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rp235x-hal = { version = "0.3", features = ["rt", "critical-section-impl", "defmt"] }
+usb-device = { version = "0.3", features = ["defmt"] }
+usbd-storage = { version = "2", features = ["bbb", "scsi", "defmt"] }
+pio = "0.2"
+critical-section = "1.2"
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+defmt = "0.3"
+defmt-rtt = "0.4"
+panic-probe = { version = "0.3", features = ["print-defmt"] }
+
+[build-dependencies]
+fatfs = "0.3"

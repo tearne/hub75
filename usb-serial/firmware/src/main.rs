@@ -106,7 +106,7 @@ async fn main(spawner: Spawner) {
     spawner.spawn(panel_task(panel).unwrap());
     spawner.spawn(usb_task(p.USB).unwrap());
 
-    defmt::info!("usb-display firmware running");
+    defmt::info!("usb-serial firmware running");
 }
 
 #[embassy_executor::task]

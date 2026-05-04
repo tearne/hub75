@@ -8,7 +8,8 @@ Rust firmware for driving HUB75 LED matrix panels from the [Pimoroni Interstate 
 |-----------|-------------|
 | [`hub75/`](hub75/) | Library crate — embassy-rp HUB75 panel driver. Two panel families (S-PWM and shift-register). |
 | [`learning-examples/`](learning-examples/) | Self-contained bare-metal examples, progressing from CPU bit-bang to fully-autonomous PIO + DMA scanning. |
-| [`usb-display/`](usb-display/) | USB-driven display: firmware (uses [`hub75`](hub75/)) + Python and Rust host clients. |
+| [`usb-serial/`](usb-serial/) | USB CDC firmware: receives frames from a host program over USB serial. + Python and Rust host clients. |
+| [`usb-drop/`](usb-drop/) | USB Mass Storage firmware: drag a frame file onto the Pico's drive to render it. |
 
 ## Getting started
 
