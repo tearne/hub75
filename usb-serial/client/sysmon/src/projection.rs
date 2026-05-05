@@ -51,6 +51,12 @@ const BACKGROUND_ENABLED: bool = false;
 /// Background dim level (only applied when `BACKGROUND_ENABLED`).
 const BACKGROUND_DIM: f32 = 0.04;
 
+/// Floor on per-row brightness scaling. Lit dots are dimmed by the
+/// row's value so a low metric reads as quiet as well as sparse, but
+/// they never drop below this fraction of full intensity — otherwise
+/// the lone dot at value≈0 would be invisible.
+const MIN_DOT_BRIGHTNESS: f32 = 0.1;
+
 /// Pair of colour variants for a metric: `(below_mean = low_sat, above_mean = high_sat)`.
 type ColourPair = (Pixel, Pixel);
 
@@ -165,14 +171,16 @@ fn paint_row(
 ) {
     let has_dots = row.value > 0.0 && row.pattern != 0;
     let (cool, warm) = colours;
-    let dot_colour = if row.above_mean { warm } else { cool };
+    let base_colour = if row.above_mean { warm } else { cool };
+    let brightness = row.value.clamp(0.0, 1.0).max(MIN_DOT_BRIGHTNESS);
+    let dot_colour = scale_pixel(base_colour, brightness);
     for col in 0..width {
         let bit = 1u8 << col;
         let lit = has_dots && (row.pattern & bit) != 0;
         let pixel = if lit {
             dot_colour
         } else if BACKGROUND_ENABLED {
-            scale_pixel(dot_colour, BACKGROUND_DIM)
+            scale_pixel(base_colour, BACKGROUND_DIM)
         } else {
             continue;
         };
@@ -181,7 +189,6 @@ fn paint_row(
     }
 }
 
-#[allow(dead_code)]
 fn scale_pixel(rgb: Pixel, factor: f32) -> Pixel {
     [
         (rgb[0] as f32 * factor).clamp(0.0, 255.0) as u8,
