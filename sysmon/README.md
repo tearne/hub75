@@ -1,6 +1,6 @@
 # sysmon
 
-System monitor for a HUB75 LED panel. Renders host CPU (per-core), RAM, Disk I/O, and Network throughput onto a 64×32 panel via a Raspberry Pi Pico running the [`usb-serial`](../../) firmware. Installs as a `systemd` service that auto-starts on boot.
+System monitor for a HUB75 LED panel. Renders host CPU (per-core), RAM, Disk I/O, and Network throughput onto a 64×32 panel via a Raspberry Pi Pico running the [`usb-serial`](../usb-serial/) firmware. Installs as a `systemd` service that auto-starts on boot.
 
 ## Hardware compatibility
 
@@ -12,18 +12,18 @@ System monitor for a HUB75 LED panel. Renders host CPU (per-core), RAM, Disk I/O
 
 The panel needs the `usb-serial` firmware running on a Raspberry Pi Pico (RP2350). One-time setup, then it sits in a USB port forever.
 
-Hold **BOOT** on the Pico while plugging it into USB to enter BOOTSEL mode, then from this repository's workspace root:
+Hold **BOOT** on the Pico while plugging it into USB to enter BOOTSEL mode, then from the repo root:
 
 ```sh
 (cd usb-serial/firmware && cargo build --release --features panel-shift-64x32) && \
   picotool load -v -x -t elf target/thumbv8m.main-none-eabihf/release/usb-serial-firmware
 ```
 
-`picotool` install instructions and udev rules for non-root access are in [`SETUP.md`](../../../SETUP.md) and [`FLASHING.md`](../../../FLASHING.md) at the repo root.
+`picotool` install instructions and udev rules for non-root access are in [`SETUP.md`](../SETUP.md) and [`FLASHING.md`](../FLASHING.md) at the repo root.
 
 ### 2. Build the deb
 
-From inside this directory (`usb-serial/client/sysmon/`):
+From inside this directory (`sysmon/`):
 
 ```sh
 ./build.sh

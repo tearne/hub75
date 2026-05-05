@@ -17,3 +17,8 @@ panic-probe = { version = "0.3", features = ["print-defmt"] }
 
 [build-dependencies]
 fatfs = "0.3"
+
+[profile.release]
+opt-level = "s"
+debug = true
+lto = true

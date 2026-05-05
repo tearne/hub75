@@ -9,3 +9,5 @@ In sysmon, each metric is shown as a row (or band) of dots whose count grows wit
 ## Conclusion
 
 `paint_row` in `usb-serial/client/sysmon/src/projection.rs` now scales the lit-dot colour by `row.value`, with a floor of `MIN_DOT_BRIGHTNESS = 0.1` so the lone dot at value≈0 stays visible. Existing `scale_pixel` reused.
+
+Version bumped 0.3.0 → 0.3.1 retroactively (the Wander change missed it; new process rule captured in `changes/process-feedback.md`).

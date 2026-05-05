@@ -70,9 +70,9 @@ cargo run --release --example life          --features panel-64x32
 cargo run --release --example clock         --features panel-64x32
 ```
 
-### Sysmon — `client/sysmon/` (standalone crate)
+### Sysmon
 
-Linux host system monitor on a 64×32 panel rotated into a 32×64 portrait view. Four vertical strips (Disk, CPU per-core, RAM, Network) with continuously time-compressed history. Lives in its own crate because it ships as a Debian package + systemd service (auto-starts on boot). See [`client/sysmon/README.md`](client/sysmon/README.md) for install instructions. Tested on Raspberry Pi 5 only.
+Linux host system monitor that consumes this protocol — promoted to its own top-level crate. See [`../sysmon/`](../sysmon/).
 
 ## Protocol
 
