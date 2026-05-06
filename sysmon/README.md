@@ -12,14 +12,15 @@ System monitor for a HUB75 LED panel. Renders host CPU (per-core), RAM, Disk I/O
 
 The panel needs the `usb-serial` firmware running on a Raspberry Pi Pico (RP2350). One-time setup, then it sits in a USB port forever.
 
-Hold **BOOT** on the Pico while plugging it into USB to enter BOOTSEL mode, then from the repo root:
+Hold **BOOT** on the Pico while plugging it into USB to enter BOOTSEL mode, then:
 
 ```sh
-(cd usb-serial/firmware && cargo build --release --features panel-shift-64x32) && \
+cd usb-serial/firmware
+cargo build --release --features panel-shift-64x32 && \
   picotool load -v -x -t elf target/thumbv8m.main-none-eabihf/release/usb-serial-firmware
 ```
 
-`picotool` install instructions and udev rules for non-root access are in [`SETUP.md`](../SETUP.md) and [`FLASHING.md`](../FLASHING.md) at the repo root.
+`picotool` install instructions and udev rules for non-root access are in [`SETUP.md`](../SETUP.md#flashing-via-bootsel) at the repo root.
 
 ### 2. Build the deb
 

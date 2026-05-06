@@ -131,7 +131,10 @@ impl FrameReceiver {
 
                     *offset += 1;
                     if *offset >= FRAME_PIXEL_BYTES {
-                        self.expected_seq = self.expected_seq.wrapping_add(1);
+                        // expected_seq was already advanced when the seq
+                        // byte was read (ReadSeq); incrementing again
+                        // here would put us one frame ahead and cause
+                        // every subsequent frame to look "1 dropped".
                         got_frame = true;
                         self.state = RxState::SyncMagic { pos: 0 };
                     }

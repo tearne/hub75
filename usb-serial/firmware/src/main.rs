@@ -1,11 +1,16 @@
 //! USB-driven HUB75 display firmware.
 //!
-//! Receives pixel frames over USB CDC and pushes them to a HUB75 panel
-//! via `hub75::shift::ShiftPanel` (shift-register family) or
-//! `hub75::Dp3364sPanel` (S-PWM family). The panel feature selected at
-//! build time decides which family is used; both run autonomously on
-//! PIO + DMA, so this firmware is just glue between the USB endpoint
-//! and `panel.commit()`.
+//! Receives pixel frames over a vendor-class USB bulk endpoint and
+//! pushes them to a HUB75 panel via `hub75::shift::ShiftPanel`
+//! (shift-register family) or `hub75::Dp3364sPanel` (S-PWM family).
+//! The panel feature selected at build time decides which family is
+//! used; both run autonomously on PIO + DMA, so this firmware is just
+//! glue between the USB endpoint and `panel.commit()`.
+//!
+//! USB descriptor: vendor-class (`0xFF`), one bulk OUT endpoint for
+//! pixel frames + one bulk IN endpoint reserved for future telemetry
+//! (declared but unused — adding it now avoids a future re-flash if
+//! buttons or status reporting land later).
 
 #![no_std]
 #![no_main]
@@ -21,7 +26,7 @@ use embassy_rp::usb;
 use embassy_rp::Peri;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
-use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
+use embassy_usb::driver::{Endpoint, EndpointOut};
 use static_cell::StaticCell;
 
 use hub75::{InterstatePins, Panel};
@@ -125,22 +130,41 @@ async fn panel_task(mut panel: ActivePanel) {
     }
 }
 
+/// pid.codes VID. PID 0x7575 chosen as a free entry; matches the
+/// "hub75" project name as a digit pair. Optionally register at
+/// pid.codes when convenient — not load-bearing for operation.
+const USB_VID: u16 = 0x1209;
+const USB_PID: u16 = 0x7575;
+
+/// Vendor-specific USB class triplet (no defined subclass/protocol).
+const VENDOR_CLASS: u8 = 0xFF;
+
+/// USB Full-Speed bulk endpoint max packet size.
+const BULK_MAX_PACKET: u16 = 64;
+
 #[embassy_executor::task]
 async fn usb_task(usb_periph: Peri<'static, USB>) {
     let driver = usb::Driver::new(usb_periph, Irqs);
 
-    let mut config = embassy_usb::Config::new(0x16c0, 0x27dd);
+    let mut config = embassy_usb::Config::new(USB_VID, USB_PID);
     config.manufacturer = Some("tearne");
     config.product = Some("hub75");
     config.serial_number = Some("001");
     config.max_power = 100;
     config.max_packet_size_0 = 64;
+    // Vendor-class at device level. We're a single-function device
+    // and don't need Interface Association Descriptors, so disable
+    // the IAD-composite default — otherwise embassy-usb panics
+    // unless we set the IAD-composite class triplet (0xEF/0x02/0x01).
+    config.device_class = VENDOR_CLASS;
+    config.device_sub_class = 0;
+    config.device_protocol = 0;
+    config.composite_with_iads = false;
 
     static CONFIG_DESC: StaticCell<[u8; 256]> = StaticCell::new();
     static BOS_DESC: StaticCell<[u8; 256]> = StaticCell::new();
     static MSOS_DESC: StaticCell<[u8; 256]> = StaticCell::new();
     static CONTROL_BUF: StaticCell<[u8; 64]> = StaticCell::new();
-    static CDC_STATE: StaticCell<State> = StaticCell::new();
 
     let mut builder = embassy_usb::Builder::new(
         driver,
@@ -151,9 +175,20 @@ async fn usb_task(usb_periph: Peri<'static, USB>) {
         CONTROL_BUF.init([0; 64]),
     );
 
-    let class = CdcAcmClass::new(&mut builder, CDC_STATE.init(State::new()), 64);
+    // Single vendor-class function with one interface and two bulk
+    // endpoints: OUT for pixel frames, IN reserved for future
+    // telemetry (declared but never written to in this firmware).
+    let (mut bulk_out, _bulk_in) = {
+        let mut function = builder.function(VENDOR_CLASS, 0, 0);
+        let mut interface = function.interface();
+        let mut alt = interface.alt_setting(VENDOR_CLASS, 0, 0, None);
+        let bulk_out = alt.endpoint_bulk_out(None, BULK_MAX_PACKET);
+        let bulk_in = alt.endpoint_bulk_in(None, BULK_MAX_PACKET);
+        drop(function);
+        (bulk_out, bulk_in)
+    };
+
     let mut usb = builder.build();
-    let (_, mut receiver) = class.split();
 
     defmt::info!("USB task started — waiting for frames");
 
@@ -163,9 +198,10 @@ async fn usb_task(usb_periph: Peri<'static, USB>) {
 
     let usb_fut = usb.run();
     let rx_fut = async {
-        let mut buf = [0u8; 64];
+        let mut buf = [0u8; BULK_MAX_PACKET as usize];
         loop {
-            match receiver.read_packet(&mut buf).await {
+            bulk_out.wait_enabled().await;
+            match bulk_out.read(&mut buf).await {
                 Ok(n) if n > 0 => {
                     let rx_buf = unsafe { &mut *core::ptr::addr_of_mut!(RX_BUF) };
                     if rx.feed(&buf[..n], rx_buf) {

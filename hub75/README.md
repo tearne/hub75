@@ -2,7 +2,7 @@
 
 HUB75 LED matrix panel driver for the [Pimoroni Interstate 75 W](https://shop.pimoroni.com/products/interstate-75-w) (RP2350A), built on [embassy-rp](https://crates.io/crates/embassy-rp).
 
-Setup and flashing: [`SETUP.md`](../SETUP.md), [`FLASHING.md`](../FLASHING.md).
+Setup and flashing: [`SETUP.md`](../SETUP.md).
 
 ## Panel families
 

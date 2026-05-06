@@ -1,8 +1,20 @@
 # usb-serial
 
-Receives RGB frames from a host computer over USB CDC (serial) and displays them on a HUB75 panel. The panel is scanned autonomously by hardware via the [`hub75`](../hub75/) crate; this firmware is just glue between the USB endpoint and the panel.
+Receives RGB frames from a host computer over a vendor-class USB bulk endpoint and displays them on a HUB75 panel. The panel is scanned autonomously by hardware via the [`hub75`](../hub75/) crate; this firmware is just glue between the USB endpoint and the panel.
 
-Setup and flashing: [`SETUP.md`](../SETUP.md), [`FLASHING.md`](../FLASHING.md). See [`hub75/`](../hub75/) for the panel-driver implementations and architecture.
+The "serial" name is historical — earlier versions used USB CDC ACM (showing up as `/dev/ttyACM*`). Since 0.5.0 the firmware uses raw bulk USB to bypass the kernel's TTY/line-discipline layer, which dominated host CPU when streaming pixel frames.
+
+## USB descriptor
+
+- **VID:** `0x1209` (pid.codes)
+- **PID:** `0x7575`
+- **Class:** vendor-specific (`0xFF`)
+- **Endpoints:** one bulk OUT for pixel frames (`0x01`), one bulk IN reserved for future telemetry/buttons (declared but unused)
+- **Strings:** `manufacturer = "tearne"`, `product = "hub75"`, `serial_number = "001"`
+
+Clients match on VID/PID, sanity-check the strings, claim interface 0, and write pixel frames to the bulk OUT endpoint. See `client/rust/src/lib.rs` for the reference Rust implementation and `client/python/hub75_client.py` for the Python equivalent.
+
+Setup and flashing: [`SETUP.md`](../SETUP.md). See [`hub75/`](../hub75/) for the panel-driver implementations and architecture.
 
 ## Panel options
 
@@ -27,7 +39,7 @@ cd firmware
 cargo run --release --features panel-shift-64x32      # or panel-shift-64x64, panel-spwm-128x64
 ```
 
-For BOOTSEL + `picotool` (no probe), see [`FLASHING.md`](../FLASHING.md).
+For BOOTSEL + `picotool` (no probe), see [`SETUP.md`](../SETUP.md#flashing-via-bootsel).
 
 ## Client examples
 

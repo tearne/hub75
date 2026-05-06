@@ -1,6 +1,13 @@
 #!/bin/sh
 set -e
 
+# Reload udev so the hub75 panel rule activates without a reboot or
+# replug. Best-effort; failures here don't block the install.
+if command -v udevadm >/dev/null 2>&1; then
+    udevadm control --reload-rules || true
+    udevadm trigger || true
+fi
+
 # Reload, enable, and start the sysmon service after install.
 if [ -d /run/systemd/system ]; then
     systemctl daemon-reload

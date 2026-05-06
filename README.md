@@ -17,8 +17,7 @@ Each crate stands alone — there is no top-level Cargo workspace. Build from in
 
 ## Getting started
 
-- [`SETUP.md`](SETUP.md) — toolchain, probe-rs, udev rules, hardware list. One-time per machine.
-- [`FLASHING.md`](FLASHING.md) — three workflows: probe + `cargo run`, BOOTSEL + `picotool`, build-once-share-ELF.
+- [`SETUP.md`](SETUP.md) — hardware list, toolchain, and the two flashing paths (BOOTSEL + `picotool`, debug probe + `probe-rs`).
 
 Each subdir has its own README with what's specific to it.
 

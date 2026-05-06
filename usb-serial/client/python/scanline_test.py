@@ -1,16 +1,15 @@
 #!/usr/bin/env -S uv run --script --
 # /// script
 # requires-python = "==3.12.*"
-# dependencies = ["pyserial"]
+# dependencies = ["pyusb"]
 # ///
 """
-Send a scanning line pattern to the HUB75 display over USB serial.
+Send a scanning line pattern to the HUB75 display over USB.
 Same pattern as crossfade_test.rs but driven from the host, so you
 can compare USB throughput vs on-device generation.
 
 Usage:
-    ./host/scanline_test.py --width 64 --height 32
-    ./host/scanline_test.py --width 64 --height 64 /dev/ttyACM0
+    ./scanline_test.py --width 64 --height 32
 """
 
 import argparse
@@ -56,13 +55,12 @@ def make_vline(x, r, g, b, width, height):
 
 def main():
     parser = argparse.ArgumentParser(description="Scanning line test over USB")
-    parser.add_argument("port", nargs="?", help="Serial port (auto-detected if omitted)")
     parser.add_argument("--width", type=int, required=True, help="Panel width in pixels")
     parser.add_argument("--height", type=int, required=True, help="Panel height in pixels")
     parser.add_argument("--fps", type=float, default=30, help="Target fps (default: 30)")
     args = parser.parse_args()
 
-    with Hub75Client(width=args.width, height=args.height, port=args.port) as client:
+    with Hub75Client(width=args.width, height=args.height) as client:
         print(f"Connected to {client.width}×{client.height}. Sending scanning lines at {args.fps} fps target. Ctrl+C to stop.")
 
         interval = 1.0 / args.fps

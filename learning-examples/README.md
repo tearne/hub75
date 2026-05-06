@@ -2,14 +2,14 @@
 
 Self-contained bare-metal examples driving HUB75 LED matrix panels on the [Pimoroni Interstate 75 W](https://shop.pimoroni.com/products/interstate-75-w) (RP2350A). Each example is a single file with everything inline — no shared libraries. Reads top-to-bottom as a progression from CPU bit-bang to fully-autonomous PIO + DMA.
 
-Setup and flashing: [`SETUP.md`](../SETUP.md), [`FLASHING.md`](../FLASHING.md).
+Setup and flashing: [`SETUP.md`](../SETUP.md).
 
 ```sh
 cd learning-examples
 cargo run --release --example <name>            # with a probe
 ```
 
-For BOOTSEL + `picotool`, see [`FLASHING.md`](../FLASHING.md).
+For BOOTSEL + `picotool`, see [`SETUP.md`](../SETUP.md#flashing-via-bootsel).
 
 ## Terminology
 

@@ -4,3 +4,19 @@
 __pycache__
 CLAUDE.md
 changes/agent/
+
+# Profiling artefacts
+perf.data*
+flamegraph.svg
+stacks-*.folded
+
+# OS / editor / IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Environment / secrets
+.env
+*.env

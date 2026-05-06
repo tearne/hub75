@@ -1,0 +1,4 @@
+# HUB75 panel firmware (vendor-class bulk USB).
+# Allows users in the `dialout` group to open the device for writes,
+# matching how CDC ACM devices on /dev/ttyACM* work out of the box.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="7575", GROUP="dialout", MODE="0660"

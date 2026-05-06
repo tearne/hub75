@@ -5,6 +5,8 @@
 //! traffic is rather than a fixed maximum.
 
 use std::io;
+use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 /// One-shot snapshot of "(a_bytes_total, b_bytes_total)" since boot.
@@ -69,32 +71,47 @@ pub fn disk_sampler() -> io::Result<ThroughputSampler> {
 const DISK_LOG_MIN_BPS: f32 = 1.0;
 const DISK_LOG_MAX_FLOOR: f32 = 10_000.0;
 
-/// Returns `(read_bytes_total, write_bytes_total)` summed across whole
-/// block devices only — virtuals (loop, ram, dm-*) and partitions are
-/// skipped. Partitions are detected by the kernel-maintained
-/// `/sys/class/block/<name>/partition` file, which only exists for
-/// partition entries; whole devices don't have it.
+/// Returns `(read_bytes_total, write_bytes_total)` summed across the
+/// host's main physical disks. Devices are auto-detected by the
+/// presence of `/sys/block/<name>/device` (a symlink the kernel
+/// maintains for real backing devices: SD/eMMC `mmcblk*`, SCSI/SATA
+/// `sd*`, NVMe `nvme*n*`). Virtuals (`loop`, `ram`, `zram`, `dm-*`)
+/// have no `device` symlink and are skipped.
+///
+/// Discovery runs once and the resulting `stat` paths are cached
+/// for the process lifetime; per-cycle work is just `read_to_string`
+/// on the known files. USB hotplug after startup is not picked up.
+///
+/// Reads `/sys/block/<name>/stat`, avoiding the `/proc/diskstats`
+/// seq_file path that formats every block device and partition on
+/// the system. Field layout (whitespace-separated): reads,
+/// read-merges, read-sectors, read-ticks, writes, write-merges,
+/// write-sectors, …; we want fields 2 and 6.
 fn read_disk_bytes() -> io::Result<(u64, u64)> {
-    let text = std::fs::read_to_string("/proc/diskstats")?;
     let mut read_sectors = 0u64;
     let mut write_sectors = 0u64;
-    for line in text.lines() {
-        let f: Vec<&str> = line.split_whitespace().collect();
-        if f.len() < 10 { continue; }
-        let name = f[2];
-        if !is_whole_block_device(name) { continue; }
-        read_sectors  += f[5].parse::<u64>().unwrap_or(0);
-        write_sectors += f[9].parse::<u64>().unwrap_or(0);
+    for stat_path in disk_stat_paths()? {
+        let text = std::fs::read_to_string(stat_path)?;
+        let f: Vec<&str> = text.split_whitespace().collect();
+        if f.len() < 7 { continue; }
+        read_sectors  += f[2].parse::<u64>().unwrap_or(0);
+        write_sectors += f[6].parse::<u64>().unwrap_or(0);
     }
     Ok((read_sectors * 512, write_sectors * 512))
 }
 
-fn is_whole_block_device(name: &str) -> bool {
-    if name.starts_with("loop") || name.starts_with("ram") || name.starts_with("dm-") {
-        return false;
+fn disk_stat_paths() -> io::Result<&'static [PathBuf]> {
+    static PATHS: OnceLock<Vec<PathBuf>> = OnceLock::new();
+    if let Some(paths) = PATHS.get() {
+        return Ok(paths);
     }
-    let partition_marker = format!("/sys/class/block/{name}/partition");
-    !std::path::Path::new(&partition_marker).exists()
+    let mut paths = Vec::new();
+    for entry in std::fs::read_dir("/sys/block")? {
+        let entry = entry?;
+        if !entry.path().join("device").exists() { continue; }
+        paths.push(entry.path().join("stat"));
+    }
+    Ok(PATHS.get_or_init(|| paths))
 }
 
 // ── Network ────────────────────────────────────────────────────────
@@ -108,6 +125,11 @@ const NET_LOG_MAX_FLOOR: f32 = 200_000.0;
 
 /// Returns `(rx_bytes_total, tx_bytes_total)` summed across non-loopback
 /// interfaces.
+///
+/// Uses `/proc/net/dev` rather than `/sys/class/net/<iface>/statistics/*`:
+/// each per-counter `/sys` file triggers a full kernel `dev_get_stats()`
+/// just to return one number, so a per-NIC pair of reads is more
+/// expensive than parsing the whole `/proc/net/dev` table once.
 fn read_net_bytes() -> io::Result<(u64, u64)> {
     let text = std::fs::read_to_string("/proc/net/dev")?;
     let mut rx = 0u64;

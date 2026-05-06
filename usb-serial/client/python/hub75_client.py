@@ -1,10 +1,16 @@
 #!/usr/bin/env -S uv run --script --
 # /// script
 # requires-python = "==3.12.*"
-# dependencies = ["pyserial"]
+# dependencies = ["pyusb"]
 # ///
 """
-Host library for sending frames to the HUB75 display over USB serial.
+Host library for sending frames to the HUB75 display over USB.
+
+Talks to the firmware's vendor-class bulk endpoint via libusb (through
+pyusb), bypassing the kernel TTY/line-discipline machinery that CDC ACM
+otherwise pulls in. The firmware advertises VID 0x1209 (pid.codes) and
+PID 0x7575; we double-check the manufacturer/product strings as a
+sanity match.
 
 The panel size is required and must match the firmware's compile-time
 panel-WxH feature; pass it explicitly to ``Hub75Client``.
@@ -12,8 +18,7 @@ panel-WxH feature; pass it explicitly to ``Hub75Client``.
 Usage as a library:
     from hub75_client import Hub75Client
 
-    client = Hub75Client(width=64, height=64)               # auto-detect port
-    client = Hub75Client(width=64, height=32, port="/dev/ttyACM0")
+    client = Hub75Client(width=64, height=32)               # auto-detect
 
     # Send a solid red frame
     frame = bytes([255, 0, 0] * client.width * client.height)
@@ -24,44 +29,58 @@ Usage as a library:
     client.send_frame(client.pack_pixels(pixels))
 
 Usage as a script (sends test patterns):
-    ./host/hub75_client.py --width 64 --height 32
-    ./host/hub75_client.py --width 64 --height 64 /dev/ttyACM0
+    ./hub75_client.py --width 64 --height 32
+
+Requires libusb-1.0 on the host. On Linux, the device must be writable
+by the calling user — see SETUP.md for the udev rule.
 """
 
 import argparse
-import math
 import os
 import sys
 import time
 
-import serial
-import serial.tools.list_ports
+import usb.core
+import usb.util
+
+USB_VID = 0x1209
+USB_PID = 0x7575
+USB_MANUFACTURER = "tearne"
+USB_PRODUCT = "hub75"
+
+# First bulk OUT endpoint on the firmware's vendor-class interface.
+BULK_OUT_ENDPOINT = 0x01
 
 FRAME_MAGIC = b"HB75"
 
 
 class Hub75Client:
-    """Send frames to the HUB75 display firmware over USB serial."""
+    """Send frames to the HUB75 display firmware over USB bulk."""
 
-    def __init__(self, width: int, height: int, port: str | None = None, baudrate: int = 115200):
+    def __init__(self, width: int, height: int, timeout_ms: int = 1000):
         self.width = width
         self.height = height
         self.frame_pixel_bytes = width * height * 3
+        self._timeout_ms = timeout_ms
 
-        port = port or _find_port()
-        if port is None:
+        self._dev = _find_device()
+        if self._dev is None:
             raise RuntimeError(
-                "Could not find HUB75 Display device. "
-                "Available ports: "
-                + ", ".join(f"{p.device} ({p.description})" for p in serial.tools.list_ports.comports())
+                f"Could not find HUB75 display "
+                f"(looking for VID {USB_VID:#06x} / PID {USB_PID:#06x}, "
+                f"manufacturer={USB_MANUFACTURER!r}, product={USB_PRODUCT!r})"
             )
-        self._ser = serial.Serial(port, baudrate=baudrate, timeout=1)
+        # Detach any kernel driver that might have grabbed the interface
+        # (rare for vendor-class, but cheap to be safe).
+        if self._dev.is_kernel_driver_active(0):
+            self._dev.detach_kernel_driver(0)
+        self._dev.set_configuration()
+        usb.util.claim_interface(self._dev, 0)
         self._seq = 0
-        # Give the device a moment to initialise after connection
-        time.sleep(0.5)
 
     def close(self):
-        self._ser.close()
+        usb.util.release_interface(self._dev, 0)
+        usb.util.dispose_resources(self._dev)
 
     def __enter__(self):
         return self
@@ -80,7 +99,7 @@ class Hub75Client:
                 f"Expected {self.frame_pixel_bytes} bytes, got {len(pixel_bytes)}"
             )
         header = FRAME_MAGIC + bytes([self._seq])
-        self._ser.write(header + pixel_bytes)
+        self._dev.write(BULK_OUT_ENDPOINT, header + pixel_bytes, self._timeout_ms)
         self._seq = (self._seq + 1) & 0xFF
 
     def pack_pixels(self, pixels) -> bytes:
@@ -94,11 +113,15 @@ class Hub75Client:
         return bytes(buf)
 
 
-def _find_port():
-    """Find the USB serial port for the HUB75 display by manufacturer + product."""
-    for port in serial.tools.list_ports.comports():
-        if port.manufacturer == "tearne" and port.product == "hub75":
-            return port.device
+def _find_device():
+    for dev in usb.core.find(find_all=True, idVendor=USB_VID, idProduct=USB_PID):
+        try:
+            manufacturer = usb.util.get_string(dev, dev.iManufacturer) or ""
+            product = usb.util.get_string(dev, dev.iProduct) or ""
+        except usb.core.USBError:
+            continue
+        if manufacturer == USB_MANUFACTURER and product == USB_PRODUCT:
+            return dev
     return None
 
 
@@ -157,7 +180,6 @@ def _hsv_to_rgb(h, s, v):
 
 def main():
     parser = argparse.ArgumentParser(description="Send test patterns to HUB75 display")
-    parser.add_argument("port", nargs="?", help="Serial port (auto-detected if omitted)")
     parser.add_argument("--width", type=int, required=True, help="Panel width in pixels (must match firmware)")
     parser.add_argument("--height", type=int, required=True, help="Panel height in pixels (must match firmware)")
     parser.add_argument(
@@ -167,7 +189,7 @@ def main():
     parser.add_argument("--fps", type=float, default=10, help="Frames per second (default: 10)")
     args = parser.parse_args()
 
-    with Hub75Client(width=args.width, height=args.height, port=args.port) as client:
+    with Hub75Client(width=args.width, height=args.height) as client:
         print(f"Connected to {client.width}×{client.height} panel. Sending '{args.pattern}' at {args.fps} fps. Ctrl+C to stop.")
 
         if args.pattern == "solid-red":
@@ -209,7 +231,7 @@ if __name__ == "__main__":
     if not os.environ.get("VIRTUAL_ENV"):
         print(
             "Error: no virtual environment detected. Run this script via "
-            "'./host/hub75_client.py' (requires uv), or activate a virtual "
+            "'./hub75_client.py' (requires uv), or activate a virtual "
             "environment first."
         )
         sys.exit(100)
