@@ -116,7 +116,7 @@ Ctrl+C disconnects without halting the firmware. The cargo runner is set per-cra
 
 ## Driving the panel from a host
 
-The `usb-serial` firmware speaks a vendor-class USB bulk protocol (VID `0x1209`, PID `0x7575` from pid.codes). Hosts talk to it via `libusb`, not as a serial port — there's no `/dev/ttyACM*`.
+The `usb-serial` firmware speaks a vendor-class USB bulk protocol — see [`usb-serial/README.md`](usb-serial/README.md#usb-descriptor) for the full descriptor (VID/PID, endpoints, strings). Hosts talk to it via `libusb`, not as a serial port — there's no `/dev/ttyACM*`.
 
 ### libusb runtime (Linux)
 

@@ -1,6 +1,6 @@
 [package]
 name = "sysmon"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 description = "HUB75 LED-panel system monitor — runs as a service, displays host CPU/RAM/Disk/Network on a 64x32 panel"
 license = "MIT"

@@ -190,10 +190,8 @@ async fn usb_task(usb_periph: Peri<'static, USB>) {
 
     let mut usb = builder.build();
 
-    defmt::info!("USB task started — waiting for frames");
-
     let mut rx = FrameReceiver::new();
-    let mut frames_this_sec: u32 = 0;
+    let mut frames_this_period: u32 = 0;
     let mut last_report = embassy_time::Instant::now();
 
     let usb_fut = usb.run();
@@ -206,13 +204,15 @@ async fn usb_task(usb_periph: Peri<'static, USB>) {
                     let rx_buf = unsafe { &mut *core::ptr::addr_of_mut!(RX_BUF) };
                     if rx.feed(&buf[..n], rx_buf) {
                         FRAME_READY.signal(());
-                        frames_this_sec += 1;
+                        frames_this_period += 1;
 
                         let now = embassy_time::Instant::now();
-                        if now.duration_since(last_report) >= embassy_time::Duration::from_secs(1)
+                        // 10 s averaging — frequent enough to see a
+                        // hung host quickly, sparse enough not to spam.
+                        if now.duration_since(last_report) >= embassy_time::Duration::from_secs(10)
                         {
-                            defmt::info!("{} fps received", frames_this_sec);
-                            frames_this_sec = 0;
+                            defmt::info!("{} fps (10s avg)", frames_this_period / 10);
+                            frames_this_period = 0;
                             last_report = now;
                         }
                     }

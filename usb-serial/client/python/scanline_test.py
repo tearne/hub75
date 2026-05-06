@@ -5,8 +5,10 @@
 # ///
 """
 Send a scanning line pattern to the HUB75 display over USB.
-Same pattern as crossfade_test.rs but driven from the host, so you
-can compare USB throughput vs on-device generation.
+
+Alternates a horizontal red line and a vertical cyan line, advancing
+one row/column per frame. Useful for eyeballing actual frame rate and
+USB throughput end-to-end.
 
 Usage:
     ./scanline_test.py --width 64 --height 32

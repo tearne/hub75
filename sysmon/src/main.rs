@@ -13,6 +13,7 @@ mod slate;
 mod throughput;
 
 use std::error::Error;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -20,11 +21,17 @@ use hub75_client::Hub75Client;
 
 use crate::cpu::CpuSampler;
 use crate::presentation::{CORE_COUNT, LOGICAL_WIDTH};
-#[allow(unused_imports)]
 use crate::projection::{PALETTE_A, PALETTE_B, Renderer};
 use crate::ram::RamSampler;
 use crate::slate::Slate;
 use crate::throughput::{ThroughputSampler, disk_sampler, net_sampler};
+
+/// Toggle to compare two palettes side-by-side: every 5 seconds the
+/// renderer flips between `PALETTE_A` and `PALETTE_B` and labels the
+/// frame with `A`/`B`. When false, only `PALETTE_A` is used and the
+/// label is blank. Edit `PALETTE_B` in `projection.rs` before enabling.
+/// See `map.md` "A/B Palette Mode".
+const AB_PALETTE_MODE: bool = false;
 
 #[derive(Clone, Copy)]
 struct Mode {
@@ -67,23 +74,34 @@ fn main() -> Result<(), Box<dyn Error>> {
         let elapsed_quarter_hours = elapsed_secs / 900;
         let shift = (initial_shift + elapsed_quarter_hours as usize) % LOGICAL_WIDTH;
 
-        // A/B palette comparison is disabled in production. To enable
-        // (e.g. for tuning a candidate colour change), edit `PALETTE_B`
-        // in `projection.rs`, comment out the next two lines, and
-        // uncomment the block below — and consider also disabling the
-        // screen-burn shift above. See `map.md` "A/B Palette Mode".
-        let palette = &PALETTE_A;
-        let label = ' ';
-        // let (palette, label) = if (elapsed_secs / 5) % 2 == 0 {
-        //     (&PALETTE_A, 'A')
-        // } else {
-        //     (&PALETTE_B, 'B')
-        // };
+        let (palette, label) = if AB_PALETTE_MODE {
+            if (elapsed_secs / 5) % 2 == 0 {
+                (&PALETTE_A, 'A')
+            } else {
+                (&PALETTE_B, 'B')
+            }
+        } else {
+            (&PALETTE_A, ' ')
+        };
 
         let frame = renderer.render(&slate, shift, palette, label);
         panel.send_frame_rgb(frame)?;
-        if let Some(rest) = mode.sampling_rate.checked_sub(cycle_start.elapsed()) {
-            thread::sleep(rest);
+        match mode.sampling_rate.checked_sub(cycle_start.elapsed()) {
+            Some(rest) => thread::sleep(rest),
+            None => {
+                // Cycle overran its sampling rate. Rate-limit the warn
+                // to once per second so we don't flood logs if it sticks.
+                static LAST_WARN: AtomicU64 = AtomicU64::new(0);
+                let now_secs = started_at.elapsed().as_secs();
+                if now_secs != LAST_WARN.load(Ordering::Relaxed) {
+                    LAST_WARN.store(now_secs, Ordering::Relaxed);
+                    eprintln!(
+                        "warn: cycle overran {} ms budget (took {} ms)",
+                        mode.sampling_rate.as_millis(),
+                        cycle_start.elapsed().as_millis()
+                    );
+                }
+            }
         }
     }
 }

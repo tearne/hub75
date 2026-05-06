@@ -8,7 +8,7 @@ Rust firmware and host tooling for driving HUB75 LED matrix panels from the [Pim
 .
 ├ hub75/                  embassy-rp HUB75 panel driver library (S-PWM + shift-register)
 ├ learning-examples/      bare-metal examples, CPU bit-bang → autonomous PIO + DMA
-├ usb-serial/             USB CDC firmware + Rust/Python host clients
+├ usb-serial/             Vendor-class USB bulk firmware + Rust/Python host clients
 ├ usb-drop/               USB Mass Storage firmware: drop a file onto the Pico's drive
 └ sysmon/                 Linux host system monitor (deb + systemd service)
 ```

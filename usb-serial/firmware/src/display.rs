@@ -1,7 +1,8 @@
 //! USB frame protocol receiver for the host → firmware pixel stream.
 //!
 //! Pixel pack, gamma, and DMA setup all live in `hub75`. This module
-//! only owns the binary frame protocol that USB CDC carries.
+//! only owns the binary frame protocol carried over the vendor-class
+//! bulk OUT endpoint.
 
 use hub75::Rgb;
 

@@ -55,10 +55,10 @@ Runs via [uv](https://docs.astral.sh/uv/) (dependencies install automatically). 
 | `scanline_test.py` | Scanline alternating horizontal red and vertical cyan, used to compare USB throughput vs on-device generation |
 
 ```sh
-./client/python/hub75_client.py --width 64 --height 32                          # rainbow
-./client/python/hub75_client.py --width 64 --height 32 --pattern solid-red       # solid
-./client/python/hub75_client.py --width 64 --height 32 --fps 15 /dev/ttyACM1     # explicit fps + port
-./client/python/scanline_test.py  --width 64 --height 32                         # scanline
+./client/python/hub75_client.py --width 64 --height 32                       # rainbow
+./client/python/hub75_client.py --width 64 --height 32 --pattern solid-red    # solid
+./client/python/hub75_client.py --width 64 --height 32 --fps 15               # explicit fps
+./client/python/scanline_test.py  --width 64 --height 32                      # scanline
 ```
 
 ### Rust — `client/rust/`
@@ -88,7 +88,7 @@ Linux host system monitor that consumes this protocol — promoted to its own to
 
 ## Protocol
 
-Each frame is a binary packet over USB CDC serial:
+Each frame is a single bulk-OUT transfer carrying:
 
 | Field | Size | Description |
 |-------|------|-------------|
@@ -96,4 +96,4 @@ Each frame is a binary packet over USB CDC serial:
 | Sequence | 1 byte | Wrapping counter (0–255) for dropped-frame detection |
 | Pixels | `WIDTH × HEIGHT × 3` bytes | RGB, row-major, top-left origin (e.g. 6,144 bytes for 64×32, 12,288 bytes for 64×64) |
 
-The client auto-detects the device by USB manufacturer (`tearne`) and product (`hub75`).
+The client matches the device by VID/PID (`0x1209:0x7575`) and double-checks the manufacturer/product strings (`tearne`/`hub75`).

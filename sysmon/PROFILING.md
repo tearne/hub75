@@ -1,6 +1,6 @@
 # Profiling sysmon
 
-How to capture a CPU flamegraph of sysmon while it talks to a live Pico. Use when investigating where host CPU goes — e.g. before deciding on a USB-protocol or render-pipeline optimisation.
+How to capture a CPU flamegraph of sysmon while it talks to a live Pico. Use when investigating where host CPU goes — e.g. before deciding on a render-pipeline change. The current baseline (post `reduce-usb-write-cost`, fast mode) is roughly 0.5% CPU at ~337M weighted samples over 30 s.
 
 ## Prerequisites
 

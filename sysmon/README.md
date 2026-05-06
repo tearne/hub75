@@ -4,7 +4,7 @@ System monitor for a HUB75 LED panel. Renders host CPU (per-core), RAM, Disk I/O
 
 ## Hardware compatibility
 
-**Tested only on Raspberry Pi 5** (aarch64). Should work on any aarch64 Debian-based Linux host with USB CDC support and a Pico flashed with the matching `panel-shift-64x32` firmware.
+**Tested only on Raspberry Pi 5** (aarch64). Should work on any aarch64 Debian-based Linux host with `libusb-1.0` available and a Pico flashed with the matching `panel-shift-64x32` firmware.
 
 ## Install
 
@@ -49,11 +49,15 @@ systemctl status sysmon         # is it running?
 journalctl -u sysmon -f         # follow its log output
 ```
 
-If the service can't find the panel device, check that the Pico is plugged in and shows up as `tearne / hub75` in `lsusb`. The service runs as root so no group-membership setup is needed.
+If the service can't find the panel device, check that the Pico is plugged in and shows up under VID/PID `1209:7575` in `lsusb`. The package installs a udev rule giving the `dialout` group access to the device.
 
 ## Configure
 
-To pass flags (e.g. a custom update interval or a specific serial port), drop a systemd override:
+Sysmon takes a single optional flag:
+
+- `-f` — fast mode (50 ms cycle, 20 Hz panel refresh). Without it: prod mode (1 s cycle).
+
+To run in fast mode under systemd, drop an override:
 
 ```sh
 sudo systemctl edit sysmon
@@ -64,12 +68,10 @@ sudo systemctl edit sysmon
 ```
 [Service]
 ExecStart=
-ExecStart=/usr/bin/sysmon -u 500 /dev/ttyACM1
+ExecStart=/usr/bin/sysmon -f
 ```
 
 Then `sudo systemctl restart sysmon`.
-
-Run `sysmon --help` for the full flag list.
 
 ## Uninstall
 

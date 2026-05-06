@@ -92,10 +92,15 @@ fn read_disk_bytes() -> io::Result<(u64, u64)> {
     let mut write_sectors = 0u64;
     for stat_path in disk_stat_paths()? {
         let text = std::fs::read_to_string(stat_path)?;
-        let f: Vec<&str> = text.split_whitespace().collect();
-        if f.len() < 7 { continue; }
-        read_sectors  += f[2].parse::<u64>().unwrap_or(0);
-        write_sectors += f[6].parse::<u64>().unwrap_or(0);
+        let mut fields = text.split_whitespace();
+        let read = fields.nth(2).and_then(|s| s.parse::<u64>().ok());
+        // .nth advances the iterator past index 2; we want the next
+        // four fields (read-ticks, writes, write-merges, write-sectors).
+        let write = fields.nth(3).and_then(|s| s.parse::<u64>().ok());
+        if let (Some(r), Some(w)) = (read, write) {
+            read_sectors += r;
+            write_sectors += w;
+        }
     }
     Ok((read_sectors * 512, write_sectors * 512))
 }
