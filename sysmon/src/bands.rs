@@ -1,6 +1,6 @@
 //! Banded rendering with inter-band pattern flow.
 //!
-//! The panel is split into 3 horizontal bands of unequal heights,
+//! The panel is split into N horizontal bands of unequal heights,
 //! each at a different aggregation timescale. Data flows downward
 //! from band to band: band 0 receives raw samples; deeper bands
 //! aggregate factor-many evicted rows from the band above. At commit

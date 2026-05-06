@@ -55,9 +55,9 @@ If the service can't find the panel device, check that the Pico is plugged in an
 
 Sysmon takes a single optional flag:
 
-- `-f` — fast mode (50 ms cycle, 20 Hz panel refresh). Without it: prod mode (1 s cycle).
+- `-f <hz>` — set the panel refresh rate, e.g. `-f 20` for 20 Hz. Without it: prod cadence (1 Hz).
 
-To run in fast mode under systemd, drop an override:
+To run at a different rate under systemd, drop an override:
 
 ```sh
 sudo systemctl edit sysmon
@@ -68,10 +68,27 @@ sudo systemctl edit sysmon
 ```
 [Service]
 ExecStart=
-ExecStart=/usr/bin/sysmon -f
+ExecStart=/usr/bin/sysmon -f 20
 ```
 
-Then `sudo systemctl restart sysmon`.
+Then `sudo systemctl restart sysmon`. If sysmon can't keep up at the requested rate it will print `warn: cycle overran ...` to the journal (via `journalctl -u sysmon`).
+
+### Frame-rate vs. CPU cost
+
+Measured on a Raspberry Pi 5 running this firmware over USB-FS bulk:
+
+| Rate | CPU (one core) |
+|---|---|
+| 1 Hz (default) | 0.04% |
+| 10 Hz | 0.31% |
+| 20 Hz | 0.5% |
+| 30 Hz | 0.82% |
+| 60 Hz | 1.24% |
+| 100 Hz | 2.0% |
+
+Above 20 Hz, host CPU scales linearly at roughly **0.025% per Hz**. The hardware ceiling is around **125 Hz** — limited by USB-FS bulk transfer time of a 6 KB frame, not by host CPU. Above ~125 Hz the cycle overruns and sysmon free-runs slower than requested.
+
+Visually, the band scroll is smooth at 20–30 Hz; higher rates are barely distinguishable. The default is 1 Hz to keep idle host load minimal; raise it to taste.
 
 ## Uninstall
 

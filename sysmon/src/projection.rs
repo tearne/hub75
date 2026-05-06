@@ -9,6 +9,8 @@
 //! drop saturation. Rendering is integer-aligned — no splat, no
 //! sub-pixel slide, no time-compression curve.
 
+use std::sync::OnceLock;
+
 use crate::bands::{BAND_COUNT, MetricBands};
 use crate::presentation::{
     CORE_COUNT, DISK_READ_LEFT, DISK_WRITE_LEFT, LOGICAL_HEIGHT, LOGICAL_WIDTH, NET_DOWN_LEFT,
@@ -17,20 +19,29 @@ use crate::presentation::{
 use crate::slate::{Pixel, Slate};
 
 /// Two palettes for A/B comparison. `main.rs` flips between them every
-/// wall-clock second. `PALETTE_A` is the baseline (currently the
-/// original pre-sysmon2 hand-tuned RGB palette); `PALETTE_B` is the
-/// experimental knob — edit it, rebuild, eyeball the alternation.
+/// 5 seconds when `AB_PALETTE_MODE` is on. `PALETTE_A` is the
+/// shipping baseline; `PALETTE_B` is the experimental knob — edit
+/// it, rebuild, eyeball the alternation.
 pub const PALETTE_A: [Pixel; 6] = [
-    /* DiskWrite */ [240,  50,  50], // red
+    /* DiskWrite */ [220,  50,  50], // red (hue 0°, sat 0.63, light 0.53)
     /* DiskRead  */ [236, 156,  19], // amber (hue 38°, sat 0.85, light 0.50)
-    /* NetDown   */ [ 16, 198,  68], // green (hue 137°, sat 0.85, light 0.42)
-    /* Cpu       */ [ 11,  98, 218], // blue (hue 215°, sat 0.90, light 0.45)
+    /* NetDown   */ [  0, 153,   0], // rich green (hue 120°, sat 1.00, light 0.30)
+    /* Cpu       */ [  0,  51, 153], // rich blue (hue 220°, sat 1.00, light 0.30)
     /* NetUp     */ [175, 215,  15], // lime (hue 72°, sat 0.87, light 0.45)
     /* Ram       */ [135,  25, 190], // bluer purple (hue 280°, sat 0.77, light 0.42)
 ];
 
+/// Experiment: dim the lime / NetUp colour a touch — push to max
+/// saturation (was 0.87) and drop lightness from 0.45 → 0.40.
 #[allow(dead_code)]
-pub const PALETTE_B: [Pixel; 6] = PALETTE_A;
+pub const PALETTE_B: [Pixel; 6] = [
+    /* DiskWrite */ [240,  50,  50], // unchanged
+    /* DiskRead  */ [236, 156,  19], // unchanged
+    /* NetDown   */ [  0, 153,   0], // unchanged from new A
+    /* Cpu       */ [  0,  51, 153], // unchanged from new A
+    /* NetUp     */ [163, 204,   0], // lime dimmer (hue 72°, sat 1.00, light 0.40)
+    /* Ram       */ [135,  25, 190], // unchanged
+];
 
 const IDX_DISK_WRITE: usize = 0;
 const IDX_DISK_READ:  usize = 1;
@@ -39,10 +50,12 @@ const IDX_CPU:        usize = 3;
 const IDX_NET_UP:     usize = 4;
 const IDX_RAM:        usize = 5;
 
-/// Saturation factor for below-mean rows. 1.0 = original colour;
-/// 0.0 = pure grey at the same brightness; 0.4 = noticeably muted
-/// while still recognisably the metric's colour.
-const SATURATION_LOW: f32 = 0.4;
+/// Chroma factor for below-mean rows (in OKLCh). 1.0 = original
+/// colour; 0.0 = pure grey at the same lightness. At very low
+/// chroma values the perceptual hue tilts (e.g. dark blue can read
+/// as purple) so we keep this above 0.5 — high enough that the hue
+/// is unambiguous, low enough to leave a clear above/below cue.
+const SATURATION_LOW: f32 = 0.7;
 
 /// Toggle: when true, fill each metric's column slice with a dim
 /// background between dots. When false, unlit pixels stay black.
@@ -65,13 +78,13 @@ fn variants_for(metric_idx: usize, palette: &[Pixel; 6]) -> ColourPair {
     (desaturate(high, SATURATION_LOW), high)
 }
 
+/// Lower the OKLCh chroma by `factor` while keeping lightness and
+/// hue exact. Perceptually uniform: a desaturated dark blue stays
+/// blue rather than drifting toward purple as the average-blend
+/// approach used to do at low lightnesses.
 fn desaturate(rgb: Pixel, factor: f32) -> Pixel {
-    let avg = (rgb[0] as f32 + rgb[1] as f32 + rgb[2] as f32) / 3.0;
-    [
-        (avg + factor * (rgb[0] as f32 - avg)).clamp(0.0, 255.0) as u8,
-        (avg + factor * (rgb[1] as f32 - avg)).clamp(0.0, 255.0) as u8,
-        (avg + factor * (rgb[2] as f32 - avg)).clamp(0.0, 255.0) as u8,
-    ]
+    let (l, c, h) = crate::oklch::srgb_to_oklch(rgb);
+    crate::oklch::oklch_to_srgb(l, c * factor, h)
 }
 
 /// Owns the reusable buffers for the render pipeline. Allocate once
@@ -110,29 +123,40 @@ impl Renderer {
         render_metric(&slate.net_down,   NET_DOWN_LEFT,   variants_for(IDX_NET_DOWN,   palette), &mut self.canvas);
         render_metric(&slate.net_up,     NET_UP_LEFT,     variants_for(IDX_NET_UP,     palette), &mut self.canvas);
 
-        draw_label(&mut self.canvas, label);
         crate::display::shift_and_rotate(&self.canvas, &mut self.frame, shift);
+        draw_label_on_frame(&mut self.frame, label);
         &self.frame
     }
 }
 
-/// Draw 'A' or 'B' as a 3×5 white pixel block at bottom-right of the
-/// logical canvas. Pre-rotation, so coordinates are portrait
-/// (LOGICAL_WIDTH cols × LOGICAL_HEIGHT rows).
-fn draw_label(canvas: &mut [Pixel], label: char) {
-    let glyph: [u8; 5] = match label {
-        'A' => [0b010, 0b101, 0b111, 0b101, 0b101],
-        'B' => [0b110, 0b101, 0b110, 0b101, 0b110],
+/// Draw 'A' (user-view bottom-left) or 'B' (user-view bottom-right)
+/// as a 3×5 glyph. The side itself signals which palette is active,
+/// so the flip is spottable at a glance.
+///
+/// Drawn *after* the screen-burn shift so the label stays put while
+/// the data scrolls underneath (otherwise the 3-column glyph could
+/// straddle the shift wrap boundary and split across edges).
+///
+/// Coordinate notes: the user views the panel rotated 90° CCW from
+/// its native (PANEL_W × PANEL_H) orientation, so the rendered image
+/// reads as portrait (LOGICAL_WIDTH × LOGICAL_HEIGHT). Both labels
+/// live at panel column 0–4 (= user's bottom row); A sits at panel
+/// rows 0–2 (= user's left), B at panel rows PANEL_H-3 .. PANEL_H-1
+/// (= user's right).
+fn draw_label_on_frame(frame: &mut [Pixel], label: char) {
+    use hub75_client::{HEIGHT as PANEL_H, WIDTH as PANEL_W};
+    let (glyph, base_y): ([u8; 5], usize) = match label {
+        'A' => ([0b010, 0b101, 0b111, 0b101, 0b101], 0),
+        'B' => ([0b110, 0b101, 0b110, 0b101, 0b110], PANEL_H - 3),
         _   => return,
     };
-    let left = LOGICAL_WIDTH - 3;
-    let top  = LOGICAL_HEIGHT - 5;
-    for (row_idx, bits) in glyph.iter().enumerate() {
+    for row_idx in 0..5 {
         for col in 0..3 {
-            let lit = bits & (1 << (2 - col)) != 0;
+            let lit = glyph[row_idx] & (1 << (2 - col)) != 0;
             if lit {
-                let idx = (top + row_idx) * LOGICAL_WIDTH + (left + col);
-                canvas[idx] = [255, 255, 255];
+                let panel_x = 4 - row_idx;
+                let panel_y = base_y + col;
+                frame[panel_y * PANEL_W + panel_x] = [255, 255, 255];
             }
         }
     }
@@ -184,9 +208,55 @@ fn paint_row(
         } else {
             continue;
         };
-        let idx = panel_y * LOGICAL_WIDTH + (left + col);
+        let idx = panel_y * LOGICAL_WIDTH + structured_column_map()[left + col];
         canvas[idx] = pixel;
     }
+}
+
+/// Layout: keep the original `<non-CPU> <CPU>` pair sequence, but
+/// pull RAM out of its trailing strip and slot one of its four
+/// columns after each `<non-CPU> <CPU>` pair as a single-column
+/// divider. Pattern, panel-col → metric:
+/// ```
+///  0..2  DiskW          ← pair 1
+///  3..6  CPU0
+///    7   RAM[0]
+///  8..10 DiskR          ← pair 2
+/// 11..14 CPU1
+///   15   RAM[1]
+/// 16..18 NetD           ← pair 3
+/// 19..22 CPU2
+///   23   RAM[2]
+/// 24..26 NetU           ← pair 4
+/// 27..30 CPU3
+///   31   RAM[3]
+/// ```
+/// Each non-CPU/CPU pair is visually framed by a single RAM dot,
+/// turning RAM into a periodic accent rather than a strip.
+fn structured_column_map() -> &'static [usize; LOGICAL_WIDTH] {
+    static MAP: OnceLock<[usize; LOGICAL_WIDTH]> = OnceLock::new();
+    MAP.get_or_init(|| {
+        // panel_col → original (contiguous-layout) column.
+        let panel_to_original: [usize; LOGICAL_WIDTH] = [
+             0,  1,  2,             // DiskW
+             3,  4,  5,  6,         // CPU0
+            28,                     // RAM[0]
+             7,  8,  9,             // DiskR
+            10, 11, 12, 13,         // CPU1
+            29,                     // RAM[1]
+            14, 15, 16,             // NetD
+            17, 18, 19, 20,         // CPU2
+            30,                     // RAM[2]
+            21, 22, 23,             // NetU
+            24, 25, 26, 27,         // CPU3
+            31,                     // RAM[3]
+        ];
+        let mut map = [0usize; LOGICAL_WIDTH];
+        for (panel_col, &original_col) in panel_to_original.iter().enumerate() {
+            map[original_col] = panel_col;
+        }
+        map
+    })
 }
 
 fn scale_pixel(rgb: Pixel, factor: f32) -> Pixel {

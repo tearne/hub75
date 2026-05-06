@@ -33,24 +33,11 @@ use crate::throughput::{ThroughputSampler, disk_sampler, net_sampler};
 /// See `map.md` "A/B Palette Mode".
 const AB_PALETTE_MODE: bool = false;
 
-#[derive(Clone, Copy)]
-struct Mode {
-    name: &'static str,
-    sampling_rate: Duration,
-}
-
-const DEFAULT_MODE: Mode = Mode {
-    name: "prod",
-    sampling_rate: Duration::from_millis(1000),
-};
-
-const FAST: Mode = Mode {
-    name: "fast",
-    sampling_rate: Duration::from_millis(50),
-};
+/// Default cycle duration when `-f` is not passed.
+const PROD_CYCLE: Duration = Duration::from_millis(1000);
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let mode = parse_mode_arg();
+    let cycle = parse_cycle_arg();
     let mut slate = Slate::new();
     let mut cpu = CpuSampler::new()?;
     let ram = RamSampler::new();
@@ -58,10 +45,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut net = net_sampler()?;
     let mut panel = Hub75Client::open_auto()?;
 
+    let hz = 1000.0 / cycle.as_millis() as f64;
     println!(
-        "sysmon [{}] connected. Sampling rate {} ms. Ctrl+C to stop.",
-        mode.name,
-        mode.sampling_rate.as_millis(),
+        "sysmon connected. {} ms cycle (~{:.1} Hz). Ctrl+C to stop.",
+        cycle.as_millis(),
+        hz,
     );
 
     let started_at = Instant::now();
@@ -86,10 +74,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         let frame = renderer.render(&slate, shift, palette, label);
         panel.send_frame_rgb(frame)?;
-        match mode.sampling_rate.checked_sub(cycle_start.elapsed()) {
+        match cycle.checked_sub(cycle_start.elapsed()) {
             Some(rest) => thread::sleep(rest),
             None => {
-                // Cycle overran its sampling rate. Rate-limit the warn
+                // Cycle overran its budget. Rate-limit the warn
                 // to once per second so we don't flood logs if it sticks.
                 static LAST_WARN: AtomicU64 = AtomicU64::new(0);
                 let now_secs = started_at.elapsed().as_secs();
@@ -97,7 +85,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     LAST_WARN.store(now_secs, Ordering::Relaxed);
                     eprintln!(
                         "warn: cycle overran {} ms budget (took {} ms)",
-                        mode.sampling_rate.as_millis(),
+                        cycle.as_millis(),
                         cycle_start.elapsed().as_millis()
                     );
                 }
@@ -106,10 +94,32 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 }
 
-/// Default mode is production (slow, lower CPU). `-f` selects fast
-/// (development) — quicker scroll for visual tuning at the cost of CPU.
-fn parse_mode_arg() -> Mode {
-    if std::env::args().skip(1).any(|a| a == "-f") { FAST } else { DEFAULT_MODE }
+/// `-f <hz>` runs at the given frame rate; without it, prod cadence
+/// (1 Hz). Examples: `sysmon -f 20`, `sysmon -f 33`. Non-integer
+/// rates are accepted; the cycle duration is rounded to the nearest
+/// millisecond.
+fn parse_cycle_arg() -> Duration {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "-f" {
+            let value = args.next().unwrap_or_else(|| usage_exit("-f needs a frame rate (Hz)"));
+            let hz: f64 = value.parse().unwrap_or_else(|_| {
+                usage_exit(&format!("-f: '{value}' is not a number"))
+            });
+            if !(hz > 0.0 && hz <= 10_000.0) {
+                usage_exit(&format!("-f: rate must be between 0 and 10000 Hz, got {hz}"));
+            }
+            let ms = (1000.0 / hz).round().max(1.0) as u64;
+            return Duration::from_millis(ms);
+        }
+    }
+    PROD_CYCLE
+}
+
+fn usage_exit(msg: &str) -> ! {
+    eprintln!("error: {msg}");
+    eprintln!("usage: sysmon [-f <hz>]   (e.g. -f 20 for 20 Hz; default: 1 Hz)");
+    std::process::exit(2);
 }
 
 /// Pick a random starting column offset for the screen-burn shift.
