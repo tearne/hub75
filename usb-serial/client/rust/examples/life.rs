@@ -34,24 +34,9 @@ const NEWBORN_HUE_SHIFT: u8 = 10;
 const SURVIVOR_NUDGE: u8 = 1;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let port = std::env::args().nth(1);
-    let mut client = match port {
-        Some(p) => Hub75Client::open(&p)?,
-        None => Hub75Client::open_auto()?,
-    };
+    let mut client = Hub75Client::open_auto()?;
 
     println!("Connected. Running Life on {}×{}. Ctrl+C to stop.", W, H);
-
-    // RGB sanity check: 1 s of solid yellow, then 1 s of solid green.
-    // Yellow is [255, 255, 0]; if R/B are swapped on the panel it'll
-    // render as cyan. Green is [0, 255, 0] — should be unmistakable.
-    println!("  RGB sanity: 1 s yellow, 1 s green");
-    let yellow = [[255u8, 255, 0]; W * H];
-    let green = [[0u8, 255, 0]; W * H];
-    client.send_frame_rgb(&yellow)?;
-    std::thread::sleep(Duration::from_secs(1));
-    client.send_frame_rgb(&green)?;
-    std::thread::sleep(Duration::from_secs(1));
 
     let (mut alive, mut hues) = random_grid(0.4);
     let mut gen: u64 = 0;

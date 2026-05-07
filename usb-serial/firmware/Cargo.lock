@@ -1577,7 +1577,7 @@ dependencies = [
 
 [[package]]
 name = "usb-serial-firmware"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "cortex-m",
  "cortex-m-rt",
