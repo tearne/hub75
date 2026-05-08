@@ -16,11 +16,11 @@ Hold **BOOT** on the Pico while plugging it into USB to enter BOOTSEL mode, then
 
 ```sh
 cd usb-serial/firmware
-cargo build --release --features panel-shift-64x32 && \
+PANEL_NAME=sysmon cargo build --release --features panel-shift-64x32 && \
   picotool load -v -x -t elf target/thumbv8m.main-none-eabihf/release/usb-serial-firmware
 ```
 
-`picotool` install instructions and udev rules for non-root access are in [`SETUP.md`](../SETUP.md#flashing-via-bootsel) at the repo root.
+`PANEL_NAME=sysmon` is required: `sysmon` only attaches to a panel whose USB `iSerial` is `sysmon`, so other panels on the same host are left alone. It will refuse to start if no such panel is attached. `picotool` install instructions and udev rules for non-root access are in [`SETUP.md`](../SETUP.md#flashing-via-bootsel) at the repo root.
 
 ### 2. Build the deb
 

@@ -114,6 +114,51 @@ cargo run --release --example <name> [--features <...>]
 
 Ctrl+C disconnects without halting the firmware. The cargo runner is set per-crate in `.cargo/config.toml` to `probe-rs run --chip RP235x`.
 
+## Targeting a specific panel
+
+Each panel is uniquely identified by **two different IDs**, depending on whether it's running firmware or sitting in BOOTSEL:
+
+| State | ID source | Visible via |
+|---|---|---|
+| Running firmware | RP2350 OTP chip ID | `lsusb -v` (`iSerial`) |
+| In BOOTSEL | SPI flash chip's unique ID | `picotool info -a` |
+
+For single-panel use, you can ignore both — there's only one device, no disambiguation needed. The rest of this section is for users juggling multiple panels.
+
+### Friendly-name override (firmware build)
+
+Bake a human-readable name into the firmware so it advertises that instead of the chip ID:
+
+```sh
+PANEL_NAME=living-room cargo build --release --features panel-shift-64x64
+# (or PANEL_NAME=… cargo run … via the debug-probe path)
+```
+
+The name appears as `iSerial` in `lsusb -v` and is what host-side clients use to target this specific panel.
+
+### Flash-time targeting (BOOTSEL workflow)
+
+If multiple boards are in BOOTSEL at once, picotool will pick one — possibly not the one you mean. List all attached boards and target deliberately:
+
+```sh
+picotool info -a              # find the flash unique ID of each board
+picotool load -v -x -t elf --ser <flash-id> path/to/firmware.elf
+```
+
+The debug-probe workflow targets physically (one probe wired to one board), so this isn't needed there.
+
+### Runtime selectors (host clients)
+
+The Rust client's `Hub75Client::open` takes an `Option<&str>` — `Some(serial)` to target a specific panel by `iSerial`, `None` for first match. The Python client takes a `serial=` kwarg.
+
+The `life` and `clock` examples accept the serial as an optional positional argument:
+
+```sh
+cargo run --release --example life --features panel-shift-64x64 -- living-room
+```
+
+`sysmon` is hardcoded to open the panel whose `iSerial` is `sysmon` — i.e. a panel flashed with `PANEL_NAME=sysmon`. It will refuse to start if no such panel is attached.
+
 ## Driving the panel from a host
 
 The `usb-serial` firmware speaks a vendor-class USB bulk protocol — see [`usb-serial/README.md`](usb-serial/README.md#usb-descriptor) for the full descriptor (VID/PID, endpoints, strings). Hosts talk to it via `libusb`, not as a serial port — there's no `/dev/ttyACM*`.
@@ -139,3 +184,23 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 Most desktop Linux installs (including Pi OS) put logins in `dialout` by default. Check with `groups`; if not, `sudo usermod -aG dialout $USER` and re-login.
 
 > The sysmon `.deb` installs this rule automatically and reloads udev in its `postinst`. Skip the manual step if you're using the deb.
+
+## Troubleshooting
+
+### Panel display corrupts, USB devices drop unexpectedly
+
+Symptoms vary by panel — random flashing pixels, garbled regions, frozen output — sometimes paired with the panel disappearing from `lsusb`, or unrelated USB devices (e.g. a debug probe) dropping at the same moment.
+
+Likely USB **over-current**. The Pi's per-port current budget is small; HUB75 panels (especially larger ones) plus a debug probe and other accessories can exceed it. When the controller trips, port power cycles, the panel's internal state corrupts, and other devices on the bus drop with it.
+
+Diagnose:
+
+```sh
+dmesg | grep over-current | tail -20
+```
+
+If you see `usbN-portM: over-current change #...` events — especially with counters in the hundreds or thousands — that's the cause. Software workarounds aren't reliable here. Mitigations:
+
+- Powered USB hub between the Pi and the panels (most reliable).
+- External power to the Pico via its `VSYS` / `VBUS` pin so it doesn't draw through the Pi's USB port.
+- Higher-current Pi PSU and/or fewer USB peripherals on the same bus.

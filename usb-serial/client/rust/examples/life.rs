@@ -34,7 +34,8 @@ const NEWBORN_HUE_SHIFT: u8 = 10;
 const SURVIVOR_NUDGE: u8 = 1;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = Hub75Client::open_auto()?;
+    let serial = std::env::args().nth(1);
+    let mut client = Hub75Client::open(serial.as_deref())?;
 
     println!("Connected. Running Life on {}×{}. Ctrl+C to stop.", W, H);
 

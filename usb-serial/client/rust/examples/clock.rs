@@ -18,7 +18,8 @@ const CY: f32 = (H as f32 - 1.0) / 2.0; // 31.5
 const RADIUS: f32 = 32.0;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = Hub75Client::open_auto()?;
+    let serial = std::env::args().nth(1);
+    let mut client = Hub75Client::open(serial.as_deref())?;
 
     println!("Connected. Showing clock. Ctrl+C to stop.");
 

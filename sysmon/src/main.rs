@@ -43,7 +43,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let ram = RamSampler::new();
     let mut disk = disk_sampler()?;
     let mut net = net_sampler()?;
-    let mut panel = Hub75Client::open_auto()?;
+    let mut panel = Hub75Client::open(Some("sysmon"))?;
 
     let hz = 1000.0 / cycle.as_millis() as f64;
     println!(

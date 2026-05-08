@@ -17,7 +17,7 @@
 //! ```no_run
 //! use hub75_client::Hub75Client;
 //!
-//! let mut client = Hub75Client::open_auto()?;
+//! let mut client = Hub75Client::open(None)?;
 //!
 //! let frame = vec![[255, 0, 0]; 64 * 32];
 //! client.send_frame_rgb(&frame)?;
@@ -93,9 +93,24 @@ pub struct Hub75Client {
 // to move between threads.
 unsafe impl Send for Hub75Client {}
 
+/// One attached panel, as reported by [`Hub75Client::list_panels`].
+#[derive(Debug, Clone)]
+pub struct PanelInfo {
+    pub serial: String,
+    /// `true` if `claim_interface` succeeded during enumeration —
+    /// the panel is currently free for this process to open. `false`
+    /// means another process (e.g. `sysmon`) holds it.
+    pub available: bool,
+}
+
 impl Hub75Client {
-    pub fn open_auto() -> Result<Self, Box<dyn std::error::Error>> {
-        let device = find_device()?;
+    /// Open a panel.
+    ///
+    /// `serial` matches the panel's USB `iSerial` (the chip-ID hex string
+    /// or a `PANEL_NAME` override baked into the firmware). `None` opens
+    /// the first matching panel — fine when only one is attached.
+    pub fn open(serial: Option<&str>) -> Result<Self, Box<dyn std::error::Error>> {
+        let device = find_device(serial)?;
         let handle = device.open()?;
         let _ = handle.set_auto_detach_kernel_driver(true);
         handle.claim_interface(0)?;
@@ -202,7 +217,46 @@ extern "system" fn transfer_callback(transfer: *mut libusb::libusb_transfer) {
     }
 }
 
-fn find_device() -> Result<rusb::Device<rusb::GlobalContext>, Box<dyn std::error::Error>> {
+impl Hub75Client {
+    /// List all attached HUB75 panels.
+    pub fn list_panels() -> Result<Vec<PanelInfo>, Box<dyn std::error::Error>> {
+        let mut panels = Vec::new();
+        for device in rusb::devices()?.iter() {
+            let desc = match device.device_descriptor() {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            if desc.vendor_id() != USB_VID || desc.product_id() != USB_PID {
+                continue;
+            }
+            let handle = match device.open() {
+                Ok(h) => h,
+                Err(_) => continue,
+            };
+            let manufacturer = handle
+                .read_manufacturer_string_ascii(&desc)
+                .unwrap_or_default();
+            let product = handle.read_product_string_ascii(&desc).unwrap_or_default();
+            if manufacturer != USB_MANUFACTURER || product != USB_PRODUCT {
+                continue;
+            }
+            let serial = handle
+                .read_serial_number_string_ascii(&desc)
+                .unwrap_or_default();
+            let _ = handle.set_auto_detach_kernel_driver(true);
+            let available = handle.claim_interface(0).is_ok();
+            if available {
+                let _ = handle.release_interface(0);
+            }
+            panels.push(PanelInfo { serial, available });
+        }
+        Ok(panels)
+    }
+}
+
+fn find_device(
+    serial: Option<&str>,
+) -> Result<rusb::Device<rusb::GlobalContext>, Box<dyn std::error::Error>> {
     for device in rusb::devices()?.iter() {
         let desc = match device.device_descriptor() {
             Ok(d) => d,
@@ -219,14 +273,32 @@ fn find_device() -> Result<rusb::Device<rusb::GlobalContext>, Box<dyn std::error
             .read_manufacturer_string_ascii(&desc)
             .unwrap_or_default();
         let product = handle.read_product_string_ascii(&desc).unwrap_or_default();
-        if manufacturer == USB_MANUFACTURER && product == USB_PRODUCT {
-            return Ok(device);
+        if manufacturer != USB_MANUFACTURER || product != USB_PRODUCT {
+            continue;
         }
+        if let Some(want) = serial {
+            let got = handle
+                .read_serial_number_string_ascii(&desc)
+                .unwrap_or_default();
+            if got != want {
+                continue;
+            }
+        }
+        return Ok(device);
     }
-    Err(format!(
-        "Could not find HUB75 display (looking for VID {:04x} / PID {:04x}, \
-         manufacturer={USB_MANUFACTURER:?}, product={USB_PRODUCT:?})",
-        USB_VID, USB_PID
-    )
-    .into())
+    match serial {
+        Some(want) => Err(format!(
+            "Could not find HUB75 display with serial {want:?} \
+             (looking for VID {:04x} / PID {:04x}, manufacturer={USB_MANUFACTURER:?}, \
+             product={USB_PRODUCT:?})",
+            USB_VID, USB_PID
+        )
+        .into()),
+        None => Err(format!(
+            "Could not find HUB75 display (looking for VID {:04x} / PID {:04x}, \
+             manufacturer={USB_MANUFACTURER:?}, product={USB_PRODUCT:?})",
+            USB_VID, USB_PID
+        )
+        .into()),
+    }
 }

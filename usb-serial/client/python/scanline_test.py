@@ -60,9 +60,10 @@ def main():
     parser.add_argument("--width", type=int, required=True, help="Panel width in pixels")
     parser.add_argument("--height", type=int, required=True, help="Panel height in pixels")
     parser.add_argument("--fps", type=float, default=30, help="Target fps (default: 30)")
+    parser.add_argument("--serial", help="Target a specific panel by USB serial number (default: first match)")
     args = parser.parse_args()
 
-    with Hub75Client(width=args.width, height=args.height) as client:
+    with Hub75Client(width=args.width, height=args.height, serial=args.serial) as client:
         print(f"Connected to {client.width}×{client.height}. Sending scanning lines at {args.fps} fps target. Ctrl+C to stop.")
 
         interval = 1.0 / args.fps

@@ -142,6 +142,25 @@ const VENDOR_CLASS: u8 = 0xFF;
 /// USB Full-Speed bulk endpoint max packet size.
 const BULK_MAX_PACKET: u16 = 64;
 
+/// USB serial-number string the firmware advertises.
+///
+/// Build with `PANEL_NAME=<name>` to bake in a friendly identifier;
+/// otherwise the firmware emits the low 32 bits of the RP2350 OTP
+/// chip ID as 8 lowercase hex chars, which is unique per board.
+fn panel_serial_number() -> &'static str {
+    if let Some(name) = option_env!("PANEL_NAME") {
+        return name;
+    }
+    static BUF: StaticCell<[u8; 8]> = StaticCell::new();
+    let buf = BUF.init([0u8; 8]);
+    let low = embassy_rp::otp::get_chipid().unwrap_or(0) as u32;
+    for i in 0..8 {
+        let nibble = ((low >> ((7 - i) * 4)) & 0xF) as u8;
+        buf[i] = if nibble < 10 { b'0' + nibble } else { b'a' + (nibble - 10) };
+    }
+    core::str::from_utf8(buf).unwrap()
+}
+
 #[embassy_executor::task]
 async fn usb_task(usb_periph: Peri<'static, USB>) {
     let driver = usb::Driver::new(usb_periph, Irqs);
@@ -149,7 +168,7 @@ async fn usb_task(usb_periph: Peri<'static, USB>) {
     let mut config = embassy_usb::Config::new(USB_VID, USB_PID);
     config.manufacturer = Some("tearne");
     config.product = Some("hub75");
-    config.serial_number = Some("001");
+    config.serial_number = Some(panel_serial_number());
     config.max_power = 100;
     config.max_packet_size_0 = 64;
     // Vendor-class at device level. We're a single-function device

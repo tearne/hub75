@@ -18,7 +18,8 @@ panel-WxH feature; pass it explicitly to ``Hub75Client``.
 Usage as a library:
     from hub75_client import Hub75Client
 
-    client = Hub75Client(width=64, height=32)               # auto-detect
+    client = Hub75Client(width=64, height=32)               # first match
+    client = Hub75Client(width=64, height=32, serial="living-room")  # specific panel
 
     # Send a solid red frame
     frame = bytes([255, 0, 0] * client.width * client.height)
@@ -57,16 +58,17 @@ FRAME_MAGIC = b"HB75"
 class Hub75Client:
     """Send frames to the HUB75 display firmware over USB bulk."""
 
-    def __init__(self, width: int, height: int, timeout_ms: int = 1000):
+    def __init__(self, width: int, height: int, serial: str | None = None, timeout_ms: int = 1000):
         self.width = width
         self.height = height
         self.frame_pixel_bytes = width * height * 3
         self._timeout_ms = timeout_ms
 
-        self._dev = _find_device()
+        self._dev = _find_device(serial)
         if self._dev is None:
+            extra = f" with serial {serial!r}" if serial else ""
             raise RuntimeError(
-                f"Could not find HUB75 display "
+                f"Could not find HUB75 display{extra} "
                 f"(looking for VID {USB_VID:#06x} / PID {USB_PID:#06x}, "
                 f"manufacturer={USB_MANUFACTURER!r}, product={USB_PRODUCT!r})"
             )
@@ -113,16 +115,49 @@ class Hub75Client:
         return bytes(buf)
 
 
-def _find_device():
+def _find_device(serial: str | None = None):
     for dev in usb.core.find(find_all=True, idVendor=USB_VID, idProduct=USB_PID):
         try:
             manufacturer = usb.util.get_string(dev, dev.iManufacturer) or ""
             product = usb.util.get_string(dev, dev.iProduct) or ""
         except usb.core.USBError:
             continue
-        if manufacturer == USB_MANUFACTURER and product == USB_PRODUCT:
-            return dev
+        if manufacturer != USB_MANUFACTURER or product != USB_PRODUCT:
+            continue
+        if serial is not None:
+            try:
+                got = usb.util.get_string(dev, dev.iSerialNumber) or ""
+            except usb.core.USBError:
+                continue
+            if got != serial:
+                continue
+        return dev
     return None
+
+
+def list_panels():
+    """Return a list of {'serial': str, 'available': bool} dicts for attached panels."""
+    panels = []
+    for dev in usb.core.find(find_all=True, idVendor=USB_VID, idProduct=USB_PID):
+        try:
+            manufacturer = usb.util.get_string(dev, dev.iManufacturer) or ""
+            product = usb.util.get_string(dev, dev.iProduct) or ""
+        except usb.core.USBError:
+            continue
+        if manufacturer != USB_MANUFACTURER or product != USB_PRODUCT:
+            continue
+        try:
+            serial = usb.util.get_string(dev, dev.iSerialNumber) or ""
+        except usb.core.USBError:
+            serial = ""
+        try:
+            usb.util.claim_interface(dev, 0)
+            available = True
+            usb.util.release_interface(dev, 0)
+        except usb.core.USBError:
+            available = False
+        panels.append({"serial": serial, "available": available})
+    return panels
 
 
 # ── Test patterns (used when run as a script) ────────────────────────
@@ -187,9 +222,10 @@ def main():
         default="rainbow", help="Test pattern to display (default: rainbow)",
     )
     parser.add_argument("--fps", type=float, default=10, help="Frames per second (default: 10)")
+    parser.add_argument("--serial", help="Target a specific panel by USB serial number (default: first match)")
     args = parser.parse_args()
 
-    with Hub75Client(width=args.width, height=args.height) as client:
+    with Hub75Client(width=args.width, height=args.height, serial=args.serial) as client:
         print(f"Connected to {client.width}×{client.height} panel. Sending '{args.pattern}' at {args.fps} fps. Ctrl+C to stop.")
 
         if args.pattern == "solid-red":
