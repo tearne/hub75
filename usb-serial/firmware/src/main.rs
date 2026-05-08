@@ -40,7 +40,9 @@ use embassy_rp::multicore::Stack;
 use hub75::{DmaIrqHandler, Dp3364sPanel};
 
 mod display;
-use display::{FrameReceiver, ReceiveBuffer, HEIGHT, WIDTH};
+use display::{FrameReceiver, ReceiveBuffer};
+#[cfg(any(feature = "panel-shift-64x64", feature = "panel-shift-64x32"))]
+use display::{HEIGHT, WIDTH};
 
 #[link_section = ".start_block"]
 #[used]
