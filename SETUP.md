@@ -136,6 +136,8 @@ PANEL_NAME=living-room cargo build --release --features panel-shift-64x64
 
 The name appears as `iSerial` in `lsusb -v` and is what host-side clients use to target this specific panel.
 
+The `usb-drop` firmware adopts the chip-ID side of this convention only — it advertises its `device_id` as the USB serial number (so each board's mass-storage drive gets a stable mount path under `/dev/disk/by-id/`) but has no `PANEL_NAME` override.
+
 ### Flash-time targeting (BOOTSEL workflow)
 
 If multiple boards are in BOOTSEL at once, picotool will pick one — possibly not the one you mean. List all attached boards and target deliberately:

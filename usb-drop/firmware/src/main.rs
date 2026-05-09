@@ -23,7 +23,9 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use critical_section::Mutex;
 use rp235x_hal as hal;
 use rp235x_hal::pac;
+use rp235x_hal::rom_data::sys_info_api::chip_info;
 use rp235x_hal::usb::UsbBus;
+use static_cell::StaticCell;
 use usb_device::bus::UsbBusAllocator;
 use usb_device::prelude::*;
 use usbd_storage::subclass::scsi::{Scsi, ScsiCommand};
@@ -121,6 +123,22 @@ const MAX_KNOWN: usize = 16;
 static mut KNOWN: [Option<FileId>; MAX_KNOWN] = [None; MAX_KNOWN];
 
 
+/// USB serial-number string the firmware advertises.
+///
+/// Emits 8 lowercase hex chars from the RP2350's `device_id`, giving each
+/// board a unique stable identifier — the OS uses this in mass-storage
+/// mount paths (e.g. `/dev/disk/by-id/usb-tearne_hub75-drop_<id>-0:0`).
+fn panel_serial_number() -> &'static str {
+    static BUF: StaticCell<[u8; 8]> = StaticCell::new();
+    let buf = BUF.init([0u8; 8]);
+    let id = chip_info().ok().flatten().map(|info| info.device_id).unwrap_or(0);
+    for i in 0..8 {
+        let nibble = ((id >> ((7 - i) * 4)) & 0xF) as u8;
+        buf[i] = if nibble < 10 { b'0' + nibble } else { b'a' + (nibble - 10) };
+    }
+    core::str::from_utf8(buf).unwrap()
+}
+
 #[rp235x_hal::entry]
 fn main() -> ! {
     let mut pac = pac::Peripherals::take().unwrap();
@@ -181,7 +199,7 @@ fn main() -> ! {
         .strings(&[StringDescriptors::new(LangID::EN)
             .manufacturer("tearne")
             .product("hub75-drop")
-            .serial_number("001")])
+            .serial_number(panel_serial_number())])
         .unwrap()
         .self_powered(false)
         .build();
