@@ -12,17 +12,40 @@ use std::time::Instant;
 /// One-shot snapshot of "(a_bytes_total, b_bytes_total)" since boot.
 pub type ByteReader = fn() -> io::Result<(u64, u64)>;
 
+/// How the two channels share their normalisation peak.
+///
+/// - `Independent` — each channel has its own monotonic peak.
+///   Activity in one direction doesn't dampen the visibility of the
+///   other. Cost: the two bands aren't directly comparable in absolute
+///   terms when peaks have diverged.
+/// - `Shared` — both channels normalise against a single monotonic
+///   peak. Bands are directly comparable: a taller band genuinely
+///   means more bytes/sec. Cost: a heavily lopsided host (e.g. far
+///   more rx than tx ever) can render the quieter direction
+///   permanently small.
+#[derive(Copy, Clone)]
+pub enum PeakMode {
+    Independent,
+    Shared,
+}
+
 pub struct ThroughputSampler {
     prev_bytes: (u64, u64),
     prev_at: Instant,
     max_a_bps: f32,
     max_b_bps: f32,
     log_min_bps: f32,
+    peak_mode: PeakMode,
     reader: ByteReader,
 }
 
 impl ThroughputSampler {
-    pub fn new(reader: ByteReader, log_min_bps: f32, log_max_floor: f32) -> io::Result<Self> {
+    pub fn new(
+        reader: ByteReader,
+        log_min_bps: f32,
+        log_max_floor: f32,
+        peak_mode: PeakMode,
+    ) -> io::Result<Self> {
         let prev_bytes = reader()?;
         Ok(Self {
             prev_bytes,
@@ -30,19 +53,30 @@ impl ThroughputSampler {
             max_a_bps: log_max_floor,
             max_b_bps: log_max_floor,
             log_min_bps,
+            peak_mode,
             reader,
         })
     }
 
     /// Returns `(a_fraction, b_fraction)` in [0, 1], log-scaled between
-    /// `log_min_bps` and the running per-channel peak.
+    /// `log_min_bps` and the running peak (per-channel or shared,
+    /// depending on `peak_mode`).
     pub fn sample(&mut self, now: Instant) -> io::Result<(f32, f32)> {
         let curr = (self.reader)()?;
         let elapsed = now.duration_since(self.prev_at).as_secs_f32().max(0.001);
         let a_bps = curr.0.saturating_sub(self.prev_bytes.0) as f32 / elapsed;
         let b_bps = curr.1.saturating_sub(self.prev_bytes.1) as f32 / elapsed;
-        self.max_a_bps = self.max_a_bps.max(a_bps);
-        self.max_b_bps = self.max_b_bps.max(b_bps);
+        match self.peak_mode {
+            PeakMode::Independent => {
+                self.max_a_bps = self.max_a_bps.max(a_bps);
+                self.max_b_bps = self.max_b_bps.max(b_bps);
+            }
+            PeakMode::Shared => {
+                let shared = self.max_a_bps.max(self.max_b_bps).max(a_bps).max(b_bps);
+                self.max_a_bps = shared;
+                self.max_b_bps = shared;
+            }
+        }
         self.prev_bytes = curr;
         self.prev_at = now;
         Ok((
@@ -65,7 +99,12 @@ fn log_fraction(bps: f32, min_bps: f32, max_bps: f32) -> f32 {
 // ── Disk ───────────────────────────────────────────────────────────
 
 pub fn disk_sampler() -> io::Result<ThroughputSampler> {
-    ThroughputSampler::new(read_disk_bytes, DISK_LOG_MIN_BPS, DISK_LOG_MAX_FLOOR)
+    ThroughputSampler::new(
+        read_disk_bytes,
+        DISK_LOG_MIN_BPS,
+        DISK_LOG_MAX_FLOOR,
+        PeakMode::Independent,
+    )
 }
 
 const DISK_LOG_MIN_BPS: f32 = 1.0;
@@ -122,10 +161,15 @@ fn disk_stat_paths() -> io::Result<&'static [PathBuf]> {
 // ── Network ────────────────────────────────────────────────────────
 
 pub fn net_sampler() -> io::Result<ThroughputSampler> {
-    ThroughputSampler::new(read_net_bytes, NET_LOG_MIN_BPS, NET_LOG_MAX_FLOOR)
+    ThroughputSampler::new(
+        read_net_bytes,
+        NET_LOG_MIN_BPS,
+        NET_LOG_MAX_FLOOR,
+        PeakMode::Shared,
+    )
 }
 
-const NET_LOG_MIN_BPS: f32 = 1.0;
+const NET_LOG_MIN_BPS: f32 = 10_000.0;
 const NET_LOG_MAX_FLOOR: f32 = 200_000.0;
 
 /// Returns `(rx_bytes_total, tx_bytes_total)` summed across non-loopback

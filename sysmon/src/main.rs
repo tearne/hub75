@@ -21,22 +21,20 @@ use hub75_client::Hub75Client;
 
 use crate::cpu::CpuSampler;
 use crate::presentation::{CORE_COUNT, LOGICAL_WIDTH};
-use crate::projection::{PALETTE_A, PALETTE_B, Renderer};
+use crate::projection::{PALETTE_A, Renderer};
 use crate::ram::RamSampler;
-use crate::slate::Slate;
+use crate::slate::{LayoutMode, Slates};
 use crate::throughput::{ThroughputSampler, disk_sampler, net_sampler};
 
-/// Toggle to compare two palettes side-by-side: every 5 seconds the
-/// renderer flips between `PALETTE_A` and `PALETTE_B` and labels the
-/// frame with `A`/`B`. When false, only `PALETTE_A` is used and the
-/// label is blank. Edit `PALETTE_B` in `projection.rs` before enabling.
-/// See `map.md` "A/B Palette Mode".
-const AB_PALETTE_MODE: bool = false;
+/// Bit position of button A in the packed button-state byte the
+/// firmware sends over the bulk IN endpoint (see `usb-serial/README.md`).
+/// Button B is currently unused by sysmon.
+const BUTTON_A_BIT: u8 = 0;
 
 /// Adaptive frame rate bounds when `-f` is not passed: cycle duration
 /// scales with peak CPU busy, fastest at full load, slowest at idle.
-const ADAPTIVE_MIN_HZ: f64 = 0.2;
-const ADAPTIVE_MAX_HZ: f64 = 30.0;
+const ADAPTIVE_MIN_HZ: f64 = 0.5;
+const ADAPTIVE_MAX_HZ: f64 = 50.0;
 
 /// Inertia time-constant for the adaptive ramp. Each cycle the
 /// driving signal eases toward the latest peak-busy with
@@ -44,23 +42,46 @@ const ADAPTIVE_MAX_HZ: f64 = 30.0;
 /// ~`ADAPTIVE_TAU_SECS` rather than snapping per-sample.
 const ADAPTIVE_TAU_SECS: f64 = 3.0;
 
+/// Curve exponent mapping smoothed peak-busy to the [0, 1] fraction
+/// used between `ADAPTIVE_MIN_HZ` and `ADAPTIVE_MAX_HZ`. With `> 1`,
+/// low busy values stay close to min — the panel sits near the floor
+/// at routine idle-ish loads and only ramps up sharply when the host
+/// is genuinely busy.
+const ADAPTIVE_CURVE: f64 = 3.0;
+
+/// How long sysmon waits between reconnection attempts when the panel
+/// is unreachable. Fast enough to feel responsive on a brief outage,
+/// slow enough that a long absence doesn't spam rusb enumeration.
+const RECONNECT_INTERVAL: Duration = Duration::from_secs(2);
+
+const PANEL_SERIAL: &str = "sysmon";
+
 fn main() -> Result<(), Box<dyn Error>> {
     let fixed_cycle = parse_cycle_arg();
-    let mut slate = Slate::new();
+    let mut slates = Slates::new(LayoutMode::FastOnly);
     let mut cpu = CpuSampler::new()?;
     let ram = RamSampler::new();
     let mut disk = disk_sampler()?;
     let mut net = net_sampler()?;
-    let mut panel = Hub75Client::open(Some("sysmon"))?;
+
+    let (mut panel, mut disconnected_at): (Option<Hub75Client>, Option<Instant>) =
+        match Hub75Client::open(Some(PANEL_SERIAL)) {
+            Ok(p) => (Some(p), None),
+            Err(e) => {
+                eprintln!("panel not available at startup ({e}); will keep retrying");
+                (None, Some(Instant::now()))
+            }
+        };
+    let mut last_reconnect_attempt = Instant::now();
 
     match fixed_cycle {
         Some(cycle) => println!(
-            "sysmon connected. {} ms cycle (~{:.1} Hz, fixed). Ctrl+C to stop.",
+            "sysmon starting. {} ms cycle (~{:.1} Hz, fixed). Ctrl+C to stop.",
             cycle.as_millis(),
             1000.0 / cycle.as_millis() as f64,
         ),
         None => println!(
-            "sysmon connected. Adaptive {:.0}–{:.0} Hz on CPU load. Ctrl+C to stop.",
+            "sysmon starting. Adaptive {:.1}–{:.0} Hz on CPU load. Button A toggles layout. Ctrl+C to stop.",
             ADAPTIVE_MIN_HZ, ADAPTIVE_MAX_HZ,
         ),
     }
@@ -69,11 +90,56 @@ fn main() -> Result<(), Box<dyn Error>> {
     let initial_shift = random_initial_shift();
     let mut renderer = Renderer::new();
     let mut peak_busy: f32 = 0.0;
-    let mut smoothed_busy: f32 = 0.0;
+    // Start the smoothed signal at the busy end of the range so the
+    // adaptive ramp opens at max Hz and eases toward idle — the panel
+    // animates immediately at startup instead of waiting on the EMA
+    // to climb out of zero at idle CPU.
+    let mut smoothed_busy: f32 = 1.0;
     let mut last_sample_at: Option<Instant> = None;
+    let mut last_button_state: u8 = 0;
     loop {
         let cycle_start = Instant::now();
-        sample_all(&mut cpu, &ram, &mut disk, &mut net, &mut slate, &mut peak_busy);
+
+        if panel.is_none() && cycle_start.duration_since(last_reconnect_attempt) >= RECONNECT_INTERVAL {
+            last_reconnect_attempt = cycle_start;
+            match Hub75Client::open(Some(PANEL_SERIAL)) {
+                Ok(p) => {
+                    let downtime = disconnected_at
+                        .map(|t| cycle_start.duration_since(t))
+                        .unwrap_or_default();
+                    println!("panel reconnected after {:.1}s", downtime.as_secs_f64());
+                    panel = Some(p);
+                    disconnected_at = None;
+                    // Firmware sends button bytes only on state change;
+                    // it doesn't replay the current state on reconnect.
+                    // Resync the host view so any held button doesn't
+                    // register as a press edge on the next genuine
+                    // transition.
+                    last_button_state = 0;
+                }
+                Err(_) => {} // quiet — next attempt in RECONNECT_INTERVAL
+            }
+        }
+
+        if let Some(p) = panel.as_mut() {
+            match drain_button_events(p, last_button_state) {
+                Ok((new_state, pressed_edges)) => {
+                    last_button_state = new_state;
+                    if pressed_edges & (1 << BUTTON_A_BIT) != 0 {
+                        let now_active = slates.toggle();
+                        println!("layout → {:?}", now_active);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("panel disconnected: {e}");
+                    panel = None;
+                    disconnected_at = Some(cycle_start);
+                    last_reconnect_attempt = cycle_start;
+                }
+            }
+        }
+
+        sample_all(&mut cpu, &ram, &mut disk, &mut net, &mut slates, &mut peak_busy);
         let dt_secs = last_sample_at
             .map(|t| cycle_start.duration_since(t).as_secs_f64())
             .unwrap_or(0.0);
@@ -85,18 +151,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         let elapsed_quarter_hours = elapsed_secs / 900;
         let shift = (initial_shift + elapsed_quarter_hours as usize) % LOGICAL_WIDTH;
 
-        let (palette, label) = if AB_PALETTE_MODE {
-            if (elapsed_secs / 5) % 2 == 0 {
-                (&PALETTE_A, 'A')
-            } else {
-                (&PALETTE_B, 'B')
+        if let Some(p) = panel.as_mut() {
+            let frame = renderer.render(slates.active(), shift, &PALETTE_A, ' ');
+            if let Err(e) = p.send_frame_rgb(frame) {
+                eprintln!("panel disconnected: {e}");
+                panel = None;
+                disconnected_at = Some(cycle_start);
+                last_reconnect_attempt = cycle_start;
             }
-        } else {
-            (&PALETTE_A, ' ')
-        };
-
-        let frame = renderer.render(&slate, shift, palette, label);
-        panel.send_frame_rgb(frame)?;
+        }
         match cycle.checked_sub(cycle_start.elapsed()) {
             Some(rest) => thread::sleep(rest),
             None => {
@@ -141,13 +204,36 @@ fn parse_cycle_arg() -> Option<Duration> {
 }
 
 /// Cycle duration for the next frame given peak CPU busy in [0, 1].
-/// Linearly interpolates Hz between `ADAPTIVE_MIN_HZ` (idle) and
-/// `ADAPTIVE_MAX_HZ` (fully loaded).
+/// Maps `busy` through `ADAPTIVE_CURVE` and interpolates Hz between
+/// `ADAPTIVE_MIN_HZ` (idle) and `ADAPTIVE_MAX_HZ` (fully loaded).
 fn adaptive_cycle(peak_busy: f32) -> Duration {
     let busy = peak_busy.clamp(0.0, 1.0) as f64;
-    let hz = ADAPTIVE_MIN_HZ + (ADAPTIVE_MAX_HZ - ADAPTIVE_MIN_HZ) * busy;
+    let weight = busy.powf(ADAPTIVE_CURVE);
+    let hz = ADAPTIVE_MIN_HZ + (ADAPTIVE_MAX_HZ - ADAPTIVE_MIN_HZ) * weight;
     let ms = (1000.0 / hz).round().max(1.0) as u64;
     Duration::from_millis(ms)
+}
+
+/// Drain all pending button-state bytes from the firmware in this
+/// cycle, returning the latest packed state and a bitmask of buttons
+/// that newly became pressed since `prev_state`. Uses a 1 ms timeout —
+/// effectively non-blocking; the firmware only writes on change, so
+/// most cycles return `Ok((prev_state, 0))` immediately.
+fn drain_button_events(
+    panel: &mut Hub75Client,
+    prev_state: u8,
+) -> Result<(u8, u8), Box<dyn Error>> {
+    let mut state = prev_state;
+    let mut pressed_edges = 0u8;
+    loop {
+        match panel.recv_event(Duration::from_millis(1))? {
+            Some(byte) => {
+                pressed_edges |= byte & !state;
+                state = byte;
+            }
+            None => return Ok((state, pressed_edges)),
+        }
+    }
 }
 
 fn usage_exit(msg: &str) -> ! {
@@ -173,14 +259,18 @@ fn sample_all(
     ram: &RamSampler,
     disk: &mut ThroughputSampler,
     net: &mut ThroughputSampler,
-    slate: &mut Slate,
+    slates: &mut Slates,
     peak_busy: &mut f32,
 ) {
     match cpu.sample() {
         Ok(busy) => {
             let mut peak: f32 = 0.0;
+            for slate in slates.each_mut() {
+                for core_idx in 0..CORE_COUNT {
+                    slate.cpu[core_idx].push_sample(busy[core_idx]);
+                }
+            }
             for core_idx in 0..CORE_COUNT {
-                slate.cpu[core_idx].push_sample(busy[core_idx]);
                 if busy[core_idx] > peak {
                     peak = busy[core_idx];
                 }
@@ -190,7 +280,11 @@ fn sample_all(
         Err(e) => eprintln!("CPU sample failed: {e}"),
     }
     match ram.sample() {
-        Ok(used) => slate.ram.push_sample(used),
+        Ok(used) => {
+            for slate in slates.each_mut() {
+                slate.ram.push_sample(used);
+            }
+        }
         Err(e) => eprintln!("RAM sample failed: {e}"),
     }
     let now = Instant::now();
@@ -199,15 +293,19 @@ fn sample_all(
             // For palette tuning without real disk activity, swap
             // `read_frac` for `synthetic_fraction(now)` to inject a
             // pseudo-random fraction. See `map.md` "A/B Palette Mode".
-            slate.disk_read.push_sample(read_frac);
-            slate.disk_write.push_sample(write_frac);
+            for slate in slates.each_mut() {
+                slate.disk_read.push_sample(read_frac);
+                slate.disk_write.push_sample(write_frac);
+            }
         }
         Err(e) => eprintln!("Disk sample failed: {e}"),
     }
     match net.sample(now) {
         Ok((rx_frac, tx_frac)) => {
-            slate.net_down.push_sample(rx_frac);
-            slate.net_up.push_sample(tx_frac);
+            for slate in slates.each_mut() {
+                slate.net_down.push_sample(rx_frac);
+                slate.net_up.push_sample(tx_frac);
+            }
         }
         Err(e) => eprintln!("Net sample failed: {e}"),
     }

@@ -92,13 +92,13 @@ Log-scale endpoints: floor `MIN_BPS = 1` (1 B/s — anything below normalises to
 
 Two metrics, each one-dimensional: down (bytes/sec received) and up (bytes/sec sent). Each is sampled at the sampling rate by differencing cumulative byte counters against the previous reading and dividing by the elapsed interval.
 
-Down and up each carry their own scale, log-normalised between a near-zero floor and a per-channel running peak — same scheme as Disk.
+Down and up share a single log scale, normalised between a 10 KB/s floor and one running peak across both directions — so the bands are directly comparable: a taller band genuinely means more bytes/sec. Disk diverges by keeping per-channel peaks.
 
 **Detail**
 
 Source: per-interface byte counters from `/proc/net/dev`, summed across non-loopback interfaces, differenced per sample.
 
-Log-scale endpoints: floor `MIN_BPS = 1` (1 B/s). Starting upper end `MAX_FLOOR = 200,000` (200 KB/s) per channel; each channel's running peak grows from there as bursts arrive.
+Log-scale endpoints: floor at 10 KB/s, starting upper end at 200 KB/s. The shared peak grows from there as bursts arrive in either direction.
 
 **See also**
 

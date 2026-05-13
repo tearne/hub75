@@ -20,13 +20,15 @@ use panic_probe as _;
 
 use embassy_executor::Spawner;
 use embassy_rp::bind_interrupts;
-use embassy_rp::peripherals::{PIO0, USB};
+use embassy_rp::gpio::{Input, Pull};
+use embassy_rp::peripherals::{PIN_14, PIN_15, PIO0, USB};
 use embassy_rp::pio::InterruptHandler as PioInterruptHandler;
 use embassy_rp::usb;
 use embassy_rp::Peri;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
-use embassy_usb::driver::{Endpoint, EndpointOut};
+use embassy_time::{Duration, Timer};
+use embassy_usb::driver::{Endpoint, EndpointIn, EndpointOut};
 use static_cell::StaticCell;
 
 use hub75::{InterstatePins, Panel};
@@ -111,7 +113,7 @@ async fn main(spawner: Spawner) {
     };
 
     spawner.spawn(panel_task(panel).unwrap());
-    spawner.spawn(usb_task(p.USB).unwrap());
+    spawner.spawn(usb_task(p.USB, p.PIN_14, p.PIN_15).unwrap());
 
     defmt::info!("usb-serial firmware running");
 }
@@ -163,8 +165,21 @@ fn panel_serial_number() -> &'static str {
     core::str::from_utf8(buf).unwrap()
 }
 
+/// Bit positions in the packed button-state byte sent on bulk IN.
+const BUTTON_A_BIT: u8 = 0;
+const BUTTON_B_BIT: u8 = 1;
+/// Poll cadence for the buttons. With 3-sample debounce this gives a
+/// 15 ms minimum press detection window — well under perceptual delay,
+/// well above mechanical bounce on the I75 tactile switches.
+const BUTTON_POLL_MS: u64 = 5;
+const BUTTON_DEBOUNCE_SAMPLES: u8 = 3;
+
 #[embassy_executor::task]
-async fn usb_task(usb_periph: Peri<'static, USB>) {
+async fn usb_task(
+    usb_periph: Peri<'static, USB>,
+    button_a: Peri<'static, PIN_14>,
+    button_b: Peri<'static, PIN_15>,
+) {
     let driver = usb::Driver::new(usb_periph, Irqs);
 
     let mut config = embassy_usb::Config::new(USB_VID, USB_PID);
@@ -199,7 +214,7 @@ async fn usb_task(usb_periph: Peri<'static, USB>) {
     // Single vendor-class function with one interface and two bulk
     // endpoints: OUT for pixel frames, IN reserved for future
     // telemetry (declared but never written to in this firmware).
-    let (mut bulk_out, _bulk_in) = {
+    let (mut bulk_out, mut bulk_in) = {
         let mut function = builder.function(VENDOR_CLASS, 0, 0);
         let mut interface = function.interface();
         let mut alt = interface.alt_setting(VENDOR_CLASS, 0, 0, None);
@@ -243,5 +258,70 @@ async fn usb_task(usb_periph: Peri<'static, USB>) {
         }
     };
 
-    embassy_futures::join::join(usb_fut, rx_fut).await;
+    let buttons_fut = button_emit_loop(button_a, button_b, &mut bulk_in);
+
+    embassy_futures::join::join3(usb_fut, rx_fut, buttons_fut).await;
+}
+
+/// Poll the two buttons at `BUTTON_POLL_MS` cadence with an
+/// `BUTTON_DEBOUNCE_SAMPLES`-deep debouncer per button. Each time the
+/// packed state changes, write a single byte to the host on the
+/// bulk IN endpoint. Buttons pull the line low when pressed.
+async fn button_emit_loop(
+    pin_a: Peri<'static, PIN_14>,
+    pin_b: Peri<'static, PIN_15>,
+    bulk_in: &mut impl EndpointIn,
+) {
+    bulk_in.wait_enabled().await;
+
+    let input_a = Input::new(pin_a, Pull::Up);
+    let input_b = Input::new(pin_b, Pull::Up);
+
+    let mut state_a = Debouncer::new();
+    let mut state_b = Debouncer::new();
+    let mut last_sent: Option<u8> = None;
+
+    loop {
+        let pressed_a = state_a.update(input_a.is_low());
+        let pressed_b = state_b.update(input_b.is_low());
+        let packed = (pressed_a as u8) << BUTTON_A_BIT | (pressed_b as u8) << BUTTON_B_BIT;
+        if last_sent != Some(packed) {
+            // Best-effort: if the host isn't draining, drop the event
+            // rather than block the poll loop. `write` returning Err
+            // generally means the endpoint stalled or disconnected;
+            // we'll resync on the next change.
+            let _ = bulk_in.write(&[packed]).await;
+            last_sent = Some(packed);
+        }
+        Timer::after(Duration::from_millis(BUTTON_POLL_MS)).await;
+    }
+}
+
+/// N-sample debouncer. The stable state flips only after
+/// `BUTTON_DEBOUNCE_SAMPLES` consecutive matching readings.
+struct Debouncer {
+    stable: bool,
+    candidate: bool,
+    streak: u8,
+}
+
+impl Debouncer {
+    fn new() -> Self {
+        Self { stable: false, candidate: false, streak: 0 }
+    }
+
+    fn update(&mut self, sample: bool) -> bool {
+        if sample == self.candidate {
+            if self.streak < BUTTON_DEBOUNCE_SAMPLES {
+                self.streak += 1;
+            }
+            if self.streak >= BUTTON_DEBOUNCE_SAMPLES {
+                self.stable = sample;
+            }
+        } else {
+            self.candidate = sample;
+            self.streak = 1;
+        }
+        self.stable
+    }
 }

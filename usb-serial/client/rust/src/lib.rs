@@ -72,6 +72,9 @@ const USB_PRODUCT: &str = "hub75";
 
 /// First bulk OUT endpoint on the firmware's vendor-class interface.
 const BULK_OUT_ENDPOINT: u8 = 0x01;
+/// First bulk IN endpoint — used for button events (one packed
+/// state byte per change).
+const BULK_IN_ENDPOINT: u8 = 0x81;
 
 /// Per-transfer timeout in milliseconds.
 const WRITE_TIMEOUT_MS: u32 = 1000;
@@ -182,6 +185,28 @@ impl Hub75Client {
         }
         self.seq = self.seq.wrapping_add(1);
         Ok(())
+    }
+
+    /// Read one button-state byte from the firmware, blocking for at
+    /// most `timeout`. Each byte is the packed state of all buttons:
+    /// bit 0 = button A, bit 1 = button B (1 = pressed). The firmware
+    /// sends one byte every time the packed state changes, so a
+    /// successful read corresponds to a press or release.
+    ///
+    /// Returns `Ok(Some(byte))` on event, `Ok(None)` on timeout, and
+    /// `Err` on a transport failure. Use a short timeout to poll from
+    /// the main loop without stalling frame sends.
+    pub fn recv_event(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> Result<Option<u8>, Box<dyn std::error::Error>> {
+        let mut buf = [0u8; 1];
+        match self.handle.read_bulk(BULK_IN_ENDPOINT, &mut buf, timeout) {
+            Ok(n) if n == 1 => Ok(Some(buf[0])),
+            Ok(_) => Ok(None),
+            Err(rusb::Error::Timeout) => Ok(None),
+            Err(e) => Err(Box::new(e)),
+        }
     }
 
     pub fn send_frame_rgb(&mut self, pixels: &[[u8; 3]]) -> Result<(), Box<dyn std::error::Error>> {

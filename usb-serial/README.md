@@ -9,7 +9,7 @@ The "serial" name is historical — earlier versions used USB CDC ACM (showing u
 - **VID:** `0x1209` (pid.codes)
 - **PID:** `0x7575`
 - **Class:** vendor-specific (`0xFF`)
-- **Endpoints:** one bulk OUT for pixel frames (`0x01`), one bulk IN reserved for future telemetry/buttons (declared but unused)
+- **Endpoints:** one bulk OUT for pixel frames (`0x01`), one bulk IN for button events (`0x81`)
 - **Strings:** `manufacturer = "tearne"`, `product = "hub75"`, `serial_number = "001"`
 
 Clients match on VID/PID, sanity-check the strings, claim interface 0, and write pixel frames to the bulk OUT endpoint. See `client/rust/src/lib.rs` for the reference Rust implementation and `client/python/hub75_client.py` for the Python equivalent.
@@ -97,3 +97,17 @@ Each frame is a single bulk-OUT transfer carrying:
 | Pixels | `WIDTH × HEIGHT × 3` bytes | RGB, row-major, top-left origin (e.g. 6,144 bytes for 64×32, 12,288 bytes for 64×64) |
 
 The client matches the device by VID/PID (`0x1209:0x7575`) and double-checks the manufacturer/product strings (`tearne`/`hub75`).
+
+### Button events (bulk IN, `0x81`)
+
+The firmware polls the two Interstate 75 buttons (A on GP14, B on GP15) every 5 ms with a 3-sample debounce. Each time the packed state changes, it writes one byte to the bulk IN endpoint:
+
+| Bit | Button | Meaning when set |
+|-----|--------|------------------|
+| 0   | A      | pressed          |
+| 1   | B      | pressed          |
+| 2–7 | —      | reserved (zero)  |
+
+State, not edges: the host can recover the press/release of each button by xor-diffing successive bytes. A host that misses a packet or reconnects will resync on the next change. Writes are best-effort — if the host isn't draining the endpoint, the firmware drops the event rather than block the poll loop.
+
+The Rust client exposes this via `Hub75Client::recv_event(timeout)` → `Ok(Some(byte))` on event, `Ok(None)` on timeout. See `client/rust/examples/buttons.rs` for a worked example.

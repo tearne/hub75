@@ -12,11 +12,35 @@
 //! randomness, giving visual continuity at the seams.
 
 pub const BAND_COUNT: usize = 3;
-pub const BAND_HEIGHTS: [usize; BAND_COUNT] = [32, 20, 12];
-pub const MAX_BAND_HEIGHT: usize = 32;
-
-const AGGREGATION_FACTORS: [u32; BAND_COUNT] = [1, 12, 12];
+/// Storage size per band. Must be ≥ the largest band height across all
+/// `BandLayout`s — `LAYOUT_FAST_ONLY` puts the whole 64-row panel in
+/// band 0, so storage tracks that.
+pub const MAX_BAND_HEIGHT: usize = 64;
 const MAX_FACTOR: usize = 12;
+
+/// Runtime-selectable layout — heights and aggregation factors per
+/// band. Switching layouts at runtime (button A) re-creates the
+/// `Slate`, losing band-row history but preserving the underlying
+/// samplers' state.
+#[derive(Copy, Clone)]
+pub struct BandLayout {
+    pub heights: [usize; BAND_COUNT],
+    pub factors: [u32; BAND_COUNT],
+}
+
+/// Three bands at 32 / 20 / 12 rows with 1× / 12× / 12× aggregation —
+/// the production layout from the start of the project.
+pub const LAYOUT_BANDED: BandLayout = BandLayout {
+    heights: [32, 20, 12],
+    factors: [1, 12, 12],
+};
+
+/// One band only, full panel height, no aggregation — the fastest
+/// view: every panel row is a raw sample.
+pub const LAYOUT_FAST_ONLY: BandLayout = BandLayout {
+    heights: [64, 0, 0],
+    factors: [1, 1, 1],
+};
 
 #[derive(Clone, Copy, Default)]
 pub struct BandRow {
@@ -89,13 +113,20 @@ impl Band {
 pub struct MetricBands {
     pub bands: [Band; BAND_COUNT],
     pub width: usize,
+    /// Stable per-metric identity mixed into the dot-placement seed
+    /// so two metrics committing on the same cycle don't pick the
+    /// same columns. Without it, every metric shares
+    /// `(commit_count, band_idx)` and `flow_pattern` decides the
+    /// same way for any two metrics with the same `target_n` and
+    /// `basis` — visible as Net rx/tx and CPU cores looking identical.
+    metric_id: u32,
     commit_count: u64,
 }
 
 impl MetricBands {
-    pub fn new(width: usize) -> Self {
-        let bands = std::array::from_fn(|i| Band::new(AGGREGATION_FACTORS[i], BAND_HEIGHTS[i]));
-        Self { bands, width, commit_count: 0 }
+    pub fn new(width: usize, metric_id: u32, layout: &BandLayout) -> Self {
+        let bands = std::array::from_fn(|i| Band::new(layout.factors[i], layout.heights[i]));
+        Self { bands, width, metric_id, commit_count: 0 }
     }
 
     pub fn push_sample(&mut self, value: f32) {
@@ -106,7 +137,13 @@ impl MetricBands {
         let mut upstream = Some(BandRow { value, pattern: 0, above_mean: false });
         for (band_idx, band) in self.bands.iter_mut().enumerate() {
             let Some(row) = upstream else { break };
-            let seed = mix32(self.commit_count as u32, band_idx as u32);
+            // Bands with height 0 don't render and have no rows to slide;
+            // skip them so `Band::push` never indexes an empty row array.
+            if band.height == 0 { break; }
+            let seed = mix32(
+                mix32(self.metric_id, self.commit_count as u32),
+                band_idx as u32,
+            );
             upstream = band.push(row, self.width, seed);
         }
     }
