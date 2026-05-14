@@ -32,11 +32,30 @@ The firmware panel feature also enables any per-panel wiring corrections in [`hu
 
 To add a new size, declare a new feature in `firmware/Cargo.toml` (forwarded to the matching `hub75/<feature>`) and `client/rust/Cargo.toml`, add matching `cfg` blocks for `WIDTH`/`HEIGHT`, and wire it through `firmware/src/main.rs`'s panel construction blocks.
 
+## Firmware variants
+
+The firmware is split into a shared library plus one binary per product:
+
+| Crate | Role |
+|---|---|
+| [`firmware-lib/`](firmware-lib/) | Library with USB descriptor setup, frame protocol, button polling. No `main`. |
+| [`firmware/`](firmware/) | **Default firmware.** Thin binary using the lib. Identity from `PANEL_NAME` env var (fallback: chip ID). For ad-hoc boards and the `life` / `clock` host examples. |
+| [`../sysmon/firmware/`](../sysmon/firmware/) | **sysmon firmware.** Thin binary using the lib. USB serial `"sysmon"` baked in, `panel-shift-64x32` selected. |
+
+Long-lived hosts that target a panel by serial should ship their own binary crate in their directory rather than relying on the default firmware's env var.
+
 ## Flash the firmware
 
+Default firmware:
 ```sh
 cd firmware
 cargo run --release --features panel-shift-64x32      # or panel-shift-64x64, panel-spwm-128x64
+```
+
+sysmon firmware:
+```sh
+cd ../sysmon/firmware
+cargo run --release
 ```
 
 For BOOTSEL + `picotool` (no probe), see [`SETUP.md`](../SETUP.md#flashing-via-bootsel).

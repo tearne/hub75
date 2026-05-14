@@ -159,7 +159,7 @@ The `life` and `clock` examples accept the serial as an optional positional argu
 cargo run --release --example life --features panel-shift-64x64 -- living-room
 ```
 
-`sysmon` is hardcoded to open the panel whose `iSerial` is `sysmon` — i.e. a panel flashed with `PANEL_NAME=sysmon`. It will refuse to start if no such panel is attached.
+`sysmon` is hardcoded to open the panel whose `iSerial` is `sysmon`. The dedicated `sysmon/firmware/` crate bakes this in — flash it directly (`cd sysmon/firmware && cargo run --release`), no `PANEL_NAME` env var needed. The default `usb-serial/firmware/` can also produce a sysmon-targeting panel if built with `PANEL_NAME=sysmon`, but the dedicated crate is the supported path. `sysmon` will retry indefinitely if no matching panel is attached at startup (see the panel-outage resilience).
 
 ## Driving the panel from a host
 

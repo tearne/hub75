@@ -10,17 +10,17 @@ System monitor for a HUB75 LED panel. Renders host CPU (per-core), RAM, Disk I/O
 
 ### 1. Flash the Pico firmware
 
-The panel needs the `usb-serial` firmware running on a Raspberry Pi Pico (RP2350). One-time setup, then it sits in a USB port forever.
+The panel needs the dedicated `sysmon-firmware` running on a Raspberry Pi Pico (RP2350). One-time setup, then it sits in a USB port forever.
 
 Hold **BOOT** on the Pico while plugging it into USB to enter BOOTSEL mode, then:
 
 ```sh
-cd usb-serial/firmware
-PANEL_NAME=sysmon cargo build --release --features panel-shift-64x32 && \
-  picotool load -v -x -t elf target/thumbv8m.main-none-eabihf/release/usb-serial-firmware
+cd firmware
+cargo build --release && \
+  picotool load -v -x -t elf target/thumbv8m.main-none-eabihf/release/sysmon-firmware
 ```
 
-`PANEL_NAME=sysmon` is required: `sysmon` only attaches to a panel whose USB `iSerial` is `sysmon`, so other panels on the same host are left alone. It will refuse to start if no such panel is attached. `picotool` install instructions and udev rules for non-root access are in [`SETUP.md`](../SETUP.md#flashing-via-bootsel) at the repo root.
+No env vars or feature flags — `firmware/` bakes in the `"sysmon"` USB serial number and the 64×32 shift panel selection. See [`firmware/`](firmware/) for what gets shared with the default firmware. `sysmon` only attaches to a panel whose USB `iSerial` is `sysmon`, so other panels on the same host are left alone. `picotool` install instructions and udev rules for non-root access are in [`SETUP.md`](../SETUP.md#flashing-via-bootsel) at the repo root.
 
 ### 2. Build the deb
 
