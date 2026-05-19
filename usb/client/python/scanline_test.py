@@ -20,7 +20,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(__file__))
-from hub75_client import Hub75Client
+from hub75_client_vendor import Hub75Client
 
 
 def make_hline(y, r, g, b, width, height):
@@ -104,7 +104,7 @@ if __name__ == "__main__":
     if not os.environ.get("VIRTUAL_ENV"):
         print(
             "Error: no virtual environment detected. Run this script via "
-            "'./host/scanline_test.py' (requires uv), or activate a virtual "
+            "'./scanline_test.py' (requires uv), or activate a virtual "
             "environment first."
         )
         sys.exit(100)

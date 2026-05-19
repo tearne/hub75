@@ -1,6 +1,6 @@
 //! Firmware for the panel that sysmon drives.
 //!
-//! Thin shell over `usb-serial-firmware-lib`. The only product-specific
+//! Thin shell over `usb-firmware-lib`. The only product-specific
 //! decisions live here: USB serial number is `"sysmon"` (so the host
 //! sysmon process can target it by name) and the panel is the 64×32
 //! shift-register family. Everything else — USB descriptor, frame
@@ -27,7 +27,7 @@ use static_cell::StaticCell;
 
 use hub75::shift::{ShiftPanel, ShiftStorage};
 use hub75::InterstatePins;
-use usb_serial_firmware_lib::{run_panel, run_usb_and_buttons, FirmwareConfig, HEIGHT, WIDTH};
+use usb_firmware_lib::{run_panel, run_usb_and_buttons, FirmwareConfig, HEIGHT, WIDTH};
 
 const PANEL_SERIAL: &str = "sysmon";
 

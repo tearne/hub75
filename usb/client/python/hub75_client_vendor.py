@@ -6,17 +6,16 @@
 """
 Host library for sending frames to the HUB75 display over USB.
 
-Talks to the firmware's vendor-class bulk endpoint via libusb (through
-pyusb), bypassing the kernel TTY/line-discipline machinery that CDC ACM
-otherwise pulls in. The firmware advertises VID 0x1209 (pid.codes) and
-PID 0x7575; we double-check the manufacturer/product strings as a
-sanity match.
+Vendor-class transport: talks to the firmware's vendor-class bulk
+endpoint via libusb (through pyusb), bypassing the kernel TTY layer.
+Fast; needs a WinUSB-style driver association on Windows. For the
+plug-and-play CDC ACM alternative, see ``hub75_client_cdc.py``.
 
 The panel size is required and must match the firmware's compile-time
 panel-WxH feature; pass it explicitly to ``Hub75Client``.
 
 Usage as a library:
-    from hub75_client import Hub75Client
+    from hub75_client_vendor import Hub75Client
 
     client = Hub75Client(width=64, height=32)               # first match
     client = Hub75Client(width=64, height=32, serial="living-room")  # specific panel
@@ -30,7 +29,7 @@ Usage as a library:
     client.send_frame(client.pack_pixels(pixels))
 
 Usage as a script (sends test patterns):
-    ./hub75_client.py --width 64 --height 32
+    ./hub75_client_vendor.py --width 64 --height 32
 
 Requires libusb-1.0 on the host. On Linux, the device must be writable
 by the calling user — see SETUP.md for the udev rule.
@@ -267,7 +266,7 @@ if __name__ == "__main__":
     if not os.environ.get("VIRTUAL_ENV"):
         print(
             "Error: no virtual environment detected. Run this script via "
-            "'./hub75_client.py' (requires uv), or activate a virtual "
+            "'./hub75_client_vendor.py' (requires uv), or activate a virtual "
             "environment first."
         )
         sys.exit(100)

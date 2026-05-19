@@ -27,7 +27,7 @@ use crate::slate::{LayoutMode, Slates};
 use crate::throughput::{ThroughputSampler, disk_sampler, net_sampler};
 
 /// Bit position of button A in the packed button-state byte the
-/// firmware sends over the bulk IN endpoint (see `usb-serial/README.md`).
+/// firmware sends over the bulk IN endpoint (see `usb/README.md`).
 /// Button B is currently unused by sysmon.
 const BUTTON_A_BIT: u8 = 0;
 

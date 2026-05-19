@@ -5,10 +5,10 @@ edition = "2021"
 description = "Firmware for the panel that sysmon drives. Bakes 'sysmon' USB serial-number identity."
 
 [features]
-default = ["usb-serial-firmware-lib/panel-shift-64x32"]
+default = ["usb-firmware-lib/panel-shift-64x32", "usb-firmware-lib/usb-class-vendor"]
 
 [dependencies]
-usb-serial-firmware-lib = { path = "../../usb-serial/firmware-lib" }
+usb-firmware-lib = { path = "../../usb/firmware-lib" }
 hub75 = { path = "../../hub75" }
 embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread", "defmt"] }
 embassy-rp = { version = "0.10", features = ["rp235xa", "defmt", "time-driver", "critical-section-impl", "unstable-pac"] }

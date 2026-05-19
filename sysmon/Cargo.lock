@@ -90,7 +90,7 @@ dependencies = [
 
 [[package]]
 name = "hub75-client"
-version = "0.5.0"
+version = "0.6.2"
 dependencies = [
  "chrono",
  "rusb",

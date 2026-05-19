@@ -1,15 +1,18 @@
 [package]
-name = "usb-serial-firmware"
-version = "0.8.0"
+name = "usb-firmware"
+version = "0.9.2"
 edition = "2021"
 
 [features]
-panel-shift-64x64 = ["usb-serial-firmware-lib/panel-shift-64x64"]
-panel-shift-64x32 = ["usb-serial-firmware-lib/panel-shift-64x32"]
-panel-spwm-128x64 = ["usb-serial-firmware-lib/panel-spwm-128x64"]
+default = ["usb-class-vendor"]
+panel-shift-64x64 = ["usb-firmware-lib/panel-shift-64x64"]
+panel-shift-64x32 = ["usb-firmware-lib/panel-shift-64x32"]
+panel-spwm-128x64 = ["usb-firmware-lib/panel-spwm-128x64"]
+usb-class-vendor = ["usb-firmware-lib/usb-class-vendor"]
+usb-class-cdc = ["usb-firmware-lib/usb-class-cdc"]
 
 [dependencies]
-usb-serial-firmware-lib = { path = "../firmware-lib" }
+usb-firmware-lib = { path = "../firmware-lib" }
 hub75 = { path = "../../hub75" }
 embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread", "defmt"] }
 embassy-rp = { version = "0.10", features = ["rp235xa", "defmt", "time-driver", "critical-section-impl", "unstable-pac"] }

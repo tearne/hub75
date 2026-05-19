@@ -1,0 +1,18 @@
+[package]
+name = "hub75-client"
+version = "0.6.2"
+edition = "2021"
+description = "Host-side client for sending frames to a HUB75 display over USB (vendor-class or CDC ACM)"
+
+[features]
+default = ["transport-vendor"]
+panel-64x64 = []
+panel-64x32 = []
+panel-128x64 = []
+transport-vendor = ["dep:rusb"]
+transport-cdc = ["dep:serialport"]
+
+[dependencies]
+rusb = { version = "0.9", optional = true }
+serialport = { version = "4", optional = true }
+chrono = "0.4"

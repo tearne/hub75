@@ -1,5 +1,5 @@
 [package]
-name = "usb-serial-firmware-lib"
+name = "usb-firmware-lib"
 version = "0.1.0"
 edition = "2021"
 description = "Shared firmware logic for USB-to-HUB75 panels: USB descriptor setup, frame protocol, button polling."
@@ -8,6 +8,8 @@ description = "Shared firmware logic for USB-to-HUB75 panels: USB descriptor set
 panel-shift-64x64 = ["hub75/panel-shift-64x64"]
 panel-shift-64x32 = ["hub75/panel-shift-64x32"]
 panel-spwm-128x64 = ["hub75/panel-spwm-128x64"]
+usb-class-vendor = []
+usb-class-cdc = []
 
 [dependencies]
 hub75 = { path = "../../hub75" }

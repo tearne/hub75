@@ -1,5 +1,5 @@
 //! Default USB-driven HUB75 firmware. Thin shell over
-//! `usb-serial-firmware-lib`. Identity is supplied via the `PANEL_NAME`
+//! `usb-firmware-lib`. Identity is supplied via the `PANEL_NAME`
 //! env var at build time, falling back to the RP2350 chip ID — fine
 //! for ad-hoc boards and the `life` / `clock` host examples.
 //!
@@ -20,7 +20,7 @@ use embassy_rp::usb;
 use static_cell::StaticCell;
 
 use hub75::InterstatePins;
-use usb_serial_firmware_lib::{run_panel, run_usb_and_buttons, FirmwareConfig, HEIGHT, WIDTH};
+use usb_firmware_lib::{run_panel, run_usb_and_buttons, FirmwareConfig, HEIGHT, WIDTH};
 
 #[cfg(any(feature = "panel-shift-64x64", feature = "panel-shift-64x32"))]
 use hub75::shift::{ShiftPanel, ShiftStorage};
@@ -77,7 +77,7 @@ async fn main(_spawner: Spawner) {
         serial_number: panel_serial_number(),
     };
 
-    defmt::info!("usb-serial firmware running");
+    defmt::info!("usb firmware running");
     embassy_futures::join::join(
         run_panel(panel),
         run_usb_and_buttons(driver, p.PIN_14, p.PIN_15, &config),

@@ -4,7 +4,7 @@ How to capture a CPU flamegraph of sysmon while it talks to a live Pico. Use whe
 
 ## Prerequisites
 
-- Pico flashed with `usb-serial` firmware and plugged in (sysmon's normal runtime state).
+- Pico flashed with `usb` firmware (vendor-class build) and plugged in (sysmon's normal runtime state).
 - Running on the host where sysmon is installed (e.g. the Raspberry Pi).
 
 ## Install tools

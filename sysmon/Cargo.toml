@@ -6,7 +6,7 @@ description = "HUB75 LED-panel system monitor — runs as a service, displays ho
 license = "MIT"
 
 [dependencies]
-hub75-client = { path = "../usb-serial/client/rust", features = ["panel-64x32"] }
+hub75-client = { path = "../usb/client/rust", features = ["panel-64x32"] }
 
 [package.metadata.deb]
 maintainer = "tearne <tearne@gmail.com>"

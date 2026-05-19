@@ -10,7 +10,7 @@ use super::COLOR_DEPTH;
 
 /// 8-bit isqrt-based gamma. Quadratic-ish curve compresses dim values
 /// without losing range at the bright end. Carried over from the
-/// `usb-serial/firmware` implementation.
+/// `usb/firmware` implementation.
 static GAMMA_LUT: [u8; 256] = {
     let mut lut = [0u8; 256];
     let mut i = 0;

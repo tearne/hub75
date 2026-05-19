@@ -58,12 +58,12 @@ cargo build --release --example <name> [--features <...>] && \
   picotool load -v -x -t elf target/thumbv8m.main-none-eabihf/release/examples/<name>
 ```
 
-For the firmware binary in `usb-serial/firmware/`, use the binary name instead of `examples/<name>`:
+For the firmware binary in `usb/firmware/`, use the binary name instead of `examples/<name>`:
 
 ```sh
-cd usb-serial/firmware
+cd usb/firmware
 cargo build --release --features panel-shift-64x32 && \
-  picotool load -v -x -t elf target/thumbv8m.main-none-eabihf/release/usb-serial-firmware
+  picotool load -v -x -t elf target/thumbv8m.main-none-eabihf/release/usb-firmware
 ```
 
 `picotool` flags:
@@ -108,7 +108,7 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 ### Flashing
 
 ```sh
-cd <crate>             # e.g. hub75/, learning-examples/, usb-serial/firmware/
+cd <crate>             # e.g. hub75/, learning-examples/, usb/firmware/
 cargo run --release --example <name> [--features <...>]
 ```
 
@@ -159,11 +159,11 @@ The `life` and `clock` examples accept the serial as an optional positional argu
 cargo run --release --example life --features panel-shift-64x64 -- living-room
 ```
 
-`sysmon` is hardcoded to open the panel whose `iSerial` is `sysmon`. The dedicated `sysmon/firmware/` crate bakes this in — flash it directly (`cd sysmon/firmware && cargo run --release`), no `PANEL_NAME` env var needed. The default `usb-serial/firmware/` can also produce a sysmon-targeting panel if built with `PANEL_NAME=sysmon`, but the dedicated crate is the supported path. `sysmon` will retry indefinitely if no matching panel is attached at startup (see the panel-outage resilience).
+`sysmon` is hardcoded to open the panel whose `iSerial` is `sysmon`. The dedicated `sysmon/firmware/` crate bakes this in — flash it directly (`cd sysmon/firmware && cargo run --release`), no `PANEL_NAME` env var needed. The default `usb/firmware/` can also produce a sysmon-targeting panel if built with `PANEL_NAME=sysmon`, but the dedicated crate is the supported path. `sysmon` will retry indefinitely if no matching panel is attached at startup (see the panel-outage resilience).
 
 ## Driving the panel from a host
 
-The `usb-serial` firmware speaks a vendor-class USB bulk protocol — see [`usb-serial/README.md`](usb-serial/README.md#usb-descriptor) for the full descriptor (VID/PID, endpoints, strings). Hosts talk to it via `libusb`, not as a serial port — there's no `/dev/ttyACM*`.
+The `usb` firmware has two transport modes selected at build time. Default (vendor class) speaks a raw USB bulk protocol — hosts talk to it via `libusb`, not as a serial port; there's no `/dev/ttyACM*`. The CDC ACM mode (`--features usb-class-cdc`) appears as `/dev/ttyACM*` on Linux/macOS or a COM port on Windows (no admin driver install needed), at the cost of host CPU. See [`usb/README.md`](usb/README.md) for the trade-off and the full USB descriptor.
 
 ### libusb runtime (Linux)
 

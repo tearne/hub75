@@ -1,96 +1,22 @@
-//! Shared firmware library for USB-driven HUB75 displays.
-//!
-//! Product-specific binaries (the default firmware in `../firmware/`,
-//! and `sysmon/firmware/`) supply panel construction, IRQ bindings, and
-//! a [`FirmwareConfig`] with their USB identity. This crate carries
-//! everything else: USB descriptor setup, the binary frame protocol on
-//! the bulk OUT endpoint, the panel-feeder loop, and button polling on
-//! the bulk IN endpoint.
-//!
-//! Typical use from a binary:
-//!
-//! ```ignore
-//! #[embassy_executor::main]
-//! async fn main(spawner: Spawner) {
-//!     let p = embassy_rp::init(Default::default());
-//!     let panel = /* construct via hub75 */;
-//!     let driver = embassy_rp::usb::Driver::new(p.USB, Irqs);
-//!     let config = FirmwareConfig { serial_number: "sysmon" };
-//!     embassy_futures::join::join(
-//!         run_panel(panel),
-//!         run_usb_and_buttons(driver, p.PIN_14, p.PIN_15, &config),
-//!     ).await;
-//! }
-//! ```
-
-#![no_std]
-
-pub mod display;
-
-pub use display::{FrameReceiver, ReceiveBuffer, HEIGHT, WIDTH};
+//! Vendor-class USB transport: a single function with one interface and
+//! two raw bulk endpoints (OUT for pixel frames, IN for button events).
+//! Host clients claim the interface via libusb-style APIs and do bulk
+//! I/O directly — no kernel TTY layer.
 
 use embassy_rp::gpio::{Input, Pull};
 use embassy_rp::peripherals::{PIN_14, PIN_15};
 use embassy_rp::Peri;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
 use embassy_usb::driver::{Driver, Endpoint, EndpointIn, EndpointOut};
-use hub75::Panel;
 use static_cell::StaticCell;
 
-/// pid.codes VID. PID 0x7575 chosen as a free entry; matches the
-/// "hub75" project name as a digit pair. Optionally register at
-/// pid.codes when convenient — not load-bearing for operation.
-pub const USB_VID: u16 = 0x1209;
-pub const USB_PID: u16 = 0x7575;
+use crate::{
+    Debouncer, FirmwareConfig, FrameReceiver, BULK_MAX_PACKET, BUTTON_A_BIT, BUTTON_B_BIT,
+    BUTTON_POLL_MS, FRAME_READY, RX_BUF, USB_PID, USB_VID,
+};
 
 /// Vendor-specific USB class triplet (no defined subclass/protocol).
-pub const VENDOR_CLASS: u8 = 0xFF;
-
-/// USB Full-Speed bulk endpoint max packet size.
-pub const BULK_MAX_PACKET: u16 = 64;
-
-/// Per-product configuration the binary supplies.
-pub struct FirmwareConfig {
-    /// USB serial number string. Bake an identifier per product
-    /// (e.g. `"sysmon"`) so hosts can target it by name.
-    pub serial_number: &'static str,
-}
-
-/// Cross-task channel from USB rx → panel feeder. The USB task fills
-/// `RX_BUF` and signals; the panel feeder copies into `panel.frame_mut()`
-/// and commits.
-pub static FRAME_READY: Signal<CriticalSectionRawMutex, ()> = Signal::new();
-pub static mut RX_BUF: ReceiveBuffer = ReceiveBuffer::new();
-
-/// Feed completed frames from `RX_BUF` into the panel as they arrive.
-/// Runs forever; await this from the binary's main.
-pub async fn run_panel<P>(mut panel: P)
-where
-    P: Panel<Frame = [[hub75::Rgb; WIDTH]; HEIGHT]>,
-{
-    loop {
-        FRAME_READY.wait().await;
-        // SAFETY: the USB task only writes RX_BUF before signalling
-        // FRAME_READY. This task consumes the signal and copies RX_BUF
-        // before yielding, so RX_BUF accesses are serialised.
-        let frame = panel.frame_mut().await;
-        unsafe {
-            *frame = (*core::ptr::addr_of!(RX_BUF)).pixels;
-        }
-        panel.commit();
-    }
-}
-
-/// Bit positions in the packed button-state byte written on bulk IN.
-pub const BUTTON_A_BIT: u8 = 0;
-pub const BUTTON_B_BIT: u8 = 1;
-/// Poll cadence for the buttons. With 3-sample debounce this gives a
-/// 15 ms minimum press detection window — well under perceptual delay,
-/// well above mechanical bounce on the I75 tactile switches.
-const BUTTON_POLL_MS: u64 = 5;
-const BUTTON_DEBOUNCE_SAMPLES: u8 = 3;
+const VENDOR_CLASS: u8 = 0xFF;
 
 /// Configure the vendor-class USB descriptor, wire up the bulk OUT
 /// receiver (frames) and bulk IN emitter (button events), and run
@@ -130,8 +56,6 @@ pub async fn run_usb_and_buttons<D: Driver<'static>>(
         CONTROL_BUF.init([0; 64]),
     );
 
-    // Single vendor-class function with one interface and two bulk
-    // endpoints: OUT for pixel frames, IN for button events.
     let (mut bulk_out, mut bulk_in) = {
         let mut function = builder.function(VENDOR_CLASS, 0, 0);
         let mut interface = function.interface();
@@ -181,10 +105,6 @@ pub async fn run_usb_and_buttons<D: Driver<'static>>(
     embassy_futures::join::join3(usb_fut, rx_fut, buttons_fut).await;
 }
 
-/// Poll the two buttons at `BUTTON_POLL_MS` cadence with an
-/// `BUTTON_DEBOUNCE_SAMPLES`-deep debouncer per button. Each time the
-/// packed state changes, write a single byte to the host on the
-/// bulk IN endpoint. Buttons pull the line low when pressed.
 async fn button_emit_loop(
     pin_a: Peri<'static, PIN_14>,
     pin_b: Peri<'static, PIN_15>,
@@ -212,34 +132,5 @@ async fn button_emit_loop(
             last_sent = Some(packed);
         }
         Timer::after(Duration::from_millis(BUTTON_POLL_MS)).await;
-    }
-}
-
-/// N-sample debouncer. The stable state flips only after
-/// `BUTTON_DEBOUNCE_SAMPLES` consecutive matching readings.
-struct Debouncer {
-    stable: bool,
-    candidate: bool,
-    streak: u8,
-}
-
-impl Debouncer {
-    fn new() -> Self {
-        Self { stable: false, candidate: false, streak: 0 }
-    }
-
-    fn update(&mut self, sample: bool) -> bool {
-        if sample == self.candidate {
-            if self.streak < BUTTON_DEBOUNCE_SAMPLES {
-                self.streak += 1;
-            }
-            if self.streak >= BUTTON_DEBOUNCE_SAMPLES {
-                self.stable = sample;
-            }
-        } else {
-            self.candidate = sample;
-            self.streak = 1;
-        }
-        self.stable
     }
 }

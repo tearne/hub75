@@ -14,7 +14,7 @@ import argparse
 import os
 import sys
 
-from hub75_client import list_panels
+from hub75_client_vendor import list_panels
 
 VERSION = "1.0.0"
 
