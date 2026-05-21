@@ -10,7 +10,8 @@ Rust firmware and host tooling for driving HUB75 LED matrix panels from the [Pim
 ├ learning-examples/      bare-metal examples, CPU bit-bang → autonomous PIO + DMA
 ├ usb/                    USB firmware library + default binary + Rust/Python host clients (vendor-class or CDC ACM)
 ├ usb-drop/               USB Mass Storage firmware: drop a file onto the Pico's drive
-└ sysmon/                 Linux host system monitor (deb + systemd service) + its dedicated firmware
+├ sysmon/                 Linux host system monitor (deb + systemd service) + its dedicated firmware
+└ dots-64x32/             Minimal example host crate: streams random dots over CDC; includes Linux→Windows cross-compile guide
 ```
 
 Each crate stands alone — there is no top-level Cargo workspace. Build from inside the crate's own directory.

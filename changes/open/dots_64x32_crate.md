@@ -55,8 +55,40 @@ The README inside `dots-64x32/` has three sections:
 
 The crate uses a path dependency on `../usb/client/rust`, so copying just `dots-64x32/` to a fresh location won't build standalone — the relative path breaks. The README notes this and tells anyone using this as a starter outside the workspace to switch the dep to a git reference (or to publish a tag of `hub75-client` first). Acceptable trade-off: an in-workspace example shouldn't pretend to be a real published-crate setup, and the path dep is what lets the example be exercised against unreleased changes to the client.
 
-## Unresolved
+## Plan
 
-- **`rand` version.** `rand` 0.9 is current; `0.8` is widely deployed and has a more stable API. No real cost either way for an example this small. Default `0.9` unless there's a reason to pin older.
-- **Whether to expose a `--serial` CLI flag** to target a specific panel by USB serial. Adds CLI parsing and a tiny dependency. Default no — `Hub75Client::open(None)` takes the first panel, which is what almost every reader wants.
-- **Should the cross-compile path also be added to the top-level `SETUP.md`** as a general "if you want to cross-compile any client from Linux to Windows" note, with the crate's README linking to it. Or keep it local to the crate. Default: keep it local — top-level SETUP is already long, and a duplicate link from the crate README is cheap.
+- [x] Create `dots-64x32/` at the workspace root.
+- [x] `dots-64x32/Cargo.toml`: name `dots-64x32`, version 0.1.0, `hub75-client` via path `../usb/client/rust` with `default-features = false, features = ["panel-64x32", "transport-cdc"]`, `rand = "0.9"`.
+- [x] `dots-64x32/.cargo/config.toml` setting `linker = "x86_64-w64-mingw32-gcc"` for the `x86_64-pc-windows-gnu` target.
+- [x] `dots-64x32/src/main.rs`: open panel, `VecDeque` of last 20 dots, 1 Hz loop, clear+paint+send each tick. Single `make_random_dot` helper. Header comment names the panel size and frame shape.
+- [x] `dots-64x32/README.md`: what it does, run on Linux, cross-compile for Windows 11 x64 (mingw install line, `rustup target add`, `cargo build --release --target x86_64-pc-windows-gnu`, where the .exe lands, a note on dependency-on-workspace-path).
+- [x] Build verify on Linux: `cargo build --release` from `dots-64x32/`.
+- [x] Install `mingw-w64` and add the windows-gnu target, then cross-compile verify: `cargo build --release --target x86_64-pc-windows-gnu`. Confirm `dots-64x32.exe` lands at the documented path.
+- [ ] Smoke-test on Linux against the CDC firmware: `cargo run --release` → dots appear on the panel, rolling 20.
+- [x] Update top-level `README.md` `## Structure` table to include `dots-64x32/`.
+
+## Log
+
+- Cross-compile to `x86_64-pc-windows-gnu` failed initially because hub75-client used `SerialPortBuilder::exclusive()`, which is Unix-only (Windows has no flock/TIOCEXCL concept and the method isn't exposed there). Fixed in hub75-client 0.6.3 by cfg-gating the call to `#[cfg(unix)]`. Cross-build now produces a 421 KB self-contained `dots-64x32.exe`.
+- Build is complete except for the on-hardware smoke test, which requires the panel attached and the CDC firmware flashed. Paused at the user's request, to be resumed potentially on a different machine.
+
+### Resuming the smoke test
+
+State at pause: every Plan task is ticked except the final "Smoke-test on Linux" item. `active.md` still points to this change. No source edits remain — the smoke test only exercises what's already on disk.
+
+Prerequisites on the resuming machine:
+
+- A 64×32 HUB75 panel attached, flashed with the `usb-class-cdc` firmware (`usb-firmware` 0.9.2 or later). If reflashing is needed, from `usb/firmware/`: `cargo build --release --no-default-features --features usb-class-cdc,panel-shift-64x32` then load via `picotool` or `probe-rs`.
+- Linux build prereqs: `libudev-dev` (for the CDC client; see `usb/README.md`). No mingw or windows-gnu target needed unless re-running the cross-compile step.
+- The panel must enumerate as `/dev/ttyACM*` (confirm with `ls /dev/ttyACM*`). If nothing else holds the port (`fuser /dev/ttyACM0` should be empty), it's ready.
+
+To run:
+
+```sh
+cd dots-64x32
+cargo run --release
+```
+
+Pass condition: a single new random-coloured pixel appears on the panel every ~1 second, with at most 20 visible at a time; once the queue is full each new pixel evicts the oldest. Ctrl+C stops cleanly.
+
+After confirmation, the build is complete and the change can move to Conclusion + archive.

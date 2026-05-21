@@ -1,0 +1,13 @@
+[package]
+name = "dots-64x32"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal reference example: streams random dots to a 64x32 HUB75 panel over USB CDC ACM."
+
+[dependencies]
+hub75-client = { path = "../usb/client/rust", default-features = false, features = ["panel-64x32", "transport-cdc"] }
+rand = "0.9"
+
+[profile.release]
+opt-level = 3
+lto = true
