@@ -6,8 +6,8 @@
 //! just an example of *what* to put in the array.
 //!
 //! This one keeps the last 20 random dots on screen, adding a fresh one twice a second.
-//! If the panel is unplugged it waits and reconnects rather than exiting, so it can be
-//! left running on a desk.
+//! If the panel is unplugged it logs the event, waits, and reconnects rather than
+//! exiting, so it can be left running on a desk.
 
 use hub75_client::{Error, Hub75Client};
 use rand::Rng;
@@ -28,18 +28,43 @@ fn make_random_dot() -> (usize, usize, [u8; 3]) {
 }
 
 /// Open the first panel, retrying once a second while none is present. A non-disconnect
-/// error (e.g. a permissions problem) is fatal — there's nothing to wait for.
+/// error at startup (e.g. a permissions problem) is fatal — there's nothing to wait for.
 fn connect_panel() -> Hub75Client {
+    let mut announced_wait = false;
     loop {
         match Hub75Client::open(None) {
-            Ok(client) => return client,
-            Err(Error::Disconnected) => std::thread::sleep(Duration::from_secs(1)),
+            Ok(client) => {
+                println!("panel connected.");
+                return client;
+            }
+            Err(Error::Disconnected) => {
+                if !announced_wait {
+                    println!("waiting for a panel to be plugged in…");
+                    announced_wait = true;
+                }
+                std::thread::sleep(Duration::from_secs(1));
+            }
             Err(e) => panic!("cannot open panel: {e}"),
         }
     }
 }
 
+/// Block until the panel comes back, retrying the in-place reconnect once a second.
+fn wait_for_panel(client: &mut Hub75Client) {
+    println!("panel disconnected — waiting for it to come back…");
+    while client.reconnect().is_err() {
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    println!("panel reconnected.");
+}
+
 fn main() {
+    // Label the terminal window (OSC title — honoured by Windows Terminal and most
+    // modern terminals, ignored elsewhere) and print a banner, so the console isn't a
+    // blank mystery window.
+    print!("\x1b]0;dots-64x32 — HUB75 panel demo\x07");
+    println!("dots-64x32: streaming random dots to a 64x32 panel. Ctrl+C to quit.");
+
     let mut client = connect_panel();
 
     // The dots currently on screen, oldest at the front so it falls off first.
@@ -57,19 +82,18 @@ fn main() {
             frame[y * WIDTH + x] = rgb;
         }
 
-        // Only `Disconnected` is worth recovering from — reconnect and carry on. Any
-        // other error (e.g. a wrong-sized frame, which is a bug) should surface loudly
-        // rather than be silently retried.
         match client.send_frame_rgb(&frame) {
             Ok(()) => {}
-            Err(Error::Disconnected) => {
-                eprintln!("panel disconnected — waiting for it to come back…");
-                while client.reconnect().is_err() {
-                    std::thread::sleep(Duration::from_secs(1));
-                }
-                eprintln!("panel reconnected.");
+            // The expected recoverable case: the panel went away.
+            Err(Error::Disconnected) => wait_for_panel(&mut client),
+            // Anything else is unexpected on a desk demo. Log exactly what it was — this
+            // is how we'd spot a host (e.g. Windows) reporting an unplug as something
+            // other than `Disconnected` — but keep running and try to recover rather
+            // than exiting and closing the window.
+            Err(other) => {
+                eprintln!("unexpected send error: {other:?} — trying to reconnect");
+                wait_for_panel(&mut client);
             }
-            Err(e) => panic!("send failed: {e}"),
         }
 
         std::thread::sleep(Duration::from_millis(500));
