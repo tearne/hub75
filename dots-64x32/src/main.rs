@@ -61,9 +61,10 @@ fn wait_for_panel(client: &mut Hub75Client) {
 fn main() {
     // Label the terminal window (OSC title — honoured by Windows Terminal and most
     // modern terminals, ignored elsewhere) and print a banner, so the console isn't a
-    // blank mystery window.
-    print!("\x1b]0;dots-64x32 — HUB75 panel demo\x07");
-    println!("dots-64x32: streaming random dots to a 64x32 panel. Ctrl+C to quit.");
+    // blank mystery window. The version comes from Cargo at build time.
+    let version = env!("CARGO_PKG_VERSION");
+    print!("\x1b]0;dots-64x32 v{version} — HUB75 panel demo\x07");
+    println!("dots-64x32 v{version}: streaming random dots to a 64x32 panel. Ctrl+C to quit.");
 
     let mut client = connect_panel();
 

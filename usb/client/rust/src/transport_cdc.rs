@@ -126,6 +126,23 @@ fn map_io_kind(kind: std::io::ErrorKind, describe: impl FnOnce() -> String) -> E
 
 impl From<std::io::Error> for Error {
     fn from(error: std::io::Error) -> Self {
+        // On Windows a yanked USB serial device surfaces as an OS error code that std
+        // maps to an uncategorised `ErrorKind`, so kind-matching alone misses it. Catch
+        // the known device-removal codes by their raw value. These are Windows error
+        // numbers, so the check must be Windows-only — the same integers mean unrelated
+        // things in errno on Unix.
+        #[cfg(windows)]
+        {
+            if let Some(code) = error.raw_os_error() {
+                // 31  = ERROR_GEN_FAILURE ("a device attached to the system is not
+                //       functioning") — observed when the panel is unplugged mid-send.
+                // 1167 = ERROR_DEVICE_NOT_CONNECTED.
+                // 22  = ERROR_BAD_COMMAND.
+                if matches!(code, 22 | 31 | 1167) {
+                    return Error::Disconnected;
+                }
+            }
+        }
         let kind = error.kind();
         map_io_kind(kind, || format!("io error: {error}"))
     }
