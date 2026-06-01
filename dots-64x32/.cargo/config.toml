@@ -1,0 +1,5 @@
+# No default [build] target: `cargo build` builds for the host Linux for local sanity-checking.
+# This block only kicks in for `cargo build --target x86_64-pc-windows-gnu`, pointing the
+# linker at mingw-w64 so the cross-compile works without setting env vars (see README).
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"

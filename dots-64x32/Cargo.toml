@@ -1,0 +1,12 @@
+[package]
+name = "dots-64x32"
+version = "0.1.4"
+edition = "2021"
+description = "Minimal reference example: random dots on a 64x32 HUB75 panel over USB CDC"
+
+[dependencies]
+# default-features = false drops the default vendor transport so we link CDC only —
+# CDC needs no admin driver install on Windows, which is what makes the cross-compiled
+# .exe distributable (see README).
+hub75-client = { path = "../usb/client/rust", default-features = false, features = ["panel-64x32", "transport-cdc"] }
+rand = "0.9"
