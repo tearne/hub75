@@ -82,7 +82,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "dots-64x32"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "hub75-client",
  "rand",
@@ -132,7 +132,7 @@ dependencies = [
 
 [[package]]
 name = "hub75-client"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "chrono",
  "serialport",

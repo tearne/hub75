@@ -72,6 +72,9 @@ pub(crate) const USB_MANUFACTURER: &str = "tearne";
 #[cfg(feature = "transport-vendor")]
 pub(crate) const USB_PRODUCT: &str = "hub75";
 
+mod error;
+pub use error::{Error, Result};
+
 #[cfg(feature = "transport-vendor")]
 mod transport_vendor;
 #[cfg(feature = "transport-vendor")]
@@ -96,6 +99,9 @@ pub struct Hub75Client {
     transport: Transport,
     buffer: Box<[u8; FRAME_BUFFER_BYTES]>,
     seq: u8,
+    /// The serial selector this client was opened with, kept so
+    /// [`reconnect`](Self::reconnect) can re-open the same panel.
+    serial: Option<String>,
 }
 
 impl Hub75Client {
@@ -104,22 +110,33 @@ impl Hub75Client {
     /// `serial` matches the panel's USB serial-number string (the
     /// firmware's chip-ID hex or a `PANEL_NAME` override). `None` opens
     /// the first matching panel — fine when only one is attached.
-    pub fn open(serial: Option<&str>) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn open(serial: Option<&str>) -> Result<Self> {
         Ok(Self {
             transport: Transport::open(serial)?,
             buffer: Box::new([0u8; FRAME_BUFFER_BYTES]),
             seq: 0,
+            serial: serial.map(str::to_owned),
         })
     }
 
-    pub fn send_frame(&mut self, pixel_bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    /// Re-open the same panel after an [`Error::Disconnected`], reusing the
+    /// serial selector from [`open`](Self::open) and preserving the frame
+    /// sequence counter so the firmware sees an unbroken stream.
+    ///
+    /// One attempt: returns `Ok(())` once reconnected, or the open error
+    /// (typically [`Error::Disconnected`] while the panel is still absent).
+    /// The caller decides when and how often to retry.
+    pub fn reconnect(&mut self) -> Result<()> {
+        self.transport = Transport::open(self.serial.as_deref())?;
+        Ok(())
+    }
+
+    pub fn send_frame(&mut self, pixel_bytes: &[u8]) -> Result<()> {
         if pixel_bytes.len() != FRAME_PIXEL_BYTES {
-            return Err(format!(
-                "Expected {} bytes, got {}",
-                FRAME_PIXEL_BYTES,
-                pixel_bytes.len()
-            )
-            .into());
+            return Err(Error::InvalidFrame {
+                expected: FRAME_PIXEL_BYTES,
+                got: pixel_bytes.len(),
+            });
         }
         self.buffer[..4].copy_from_slice(FRAME_MAGIC);
         self.buffer[4] = self.seq;
@@ -129,14 +146,12 @@ impl Hub75Client {
         Ok(())
     }
 
-    pub fn send_frame_rgb(&mut self, pixels: &[[u8; 3]]) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn send_frame_rgb(&mut self, pixels: &[[u8; 3]]) -> Result<()> {
         if pixels.len() != WIDTH * HEIGHT {
-            return Err(format!(
-                "Expected {} pixels, got {}",
-                WIDTH * HEIGHT,
-                pixels.len()
-            )
-            .into());
+            return Err(Error::InvalidFrame {
+                expected: WIDTH * HEIGHT,
+                got: pixels.len(),
+            });
         }
         let bytes: &[u8] =
             unsafe { std::slice::from_raw_parts(pixels.as_ptr() as *const u8, FRAME_PIXEL_BYTES) };
@@ -146,15 +161,12 @@ impl Hub75Client {
     /// Read one button-state byte from the firmware, blocking for at
     /// most `timeout`. Bit 0 = button A, bit 1 = button B; 1 = pressed.
     /// Returns `Ok(Some(byte))` on event, `Ok(None)` on timeout.
-    pub fn recv_event(
-        &mut self,
-        timeout: std::time::Duration,
-    ) -> Result<Option<u8>, Box<dyn std::error::Error>> {
+    pub fn recv_event(&mut self, timeout: std::time::Duration) -> Result<Option<u8>> {
         self.transport.recv_event(timeout)
     }
 
     /// List all attached HUB75 panels visible to the active transport.
-    pub fn list_panels() -> Result<Vec<PanelInfo>, Box<dyn std::error::Error>> {
+    pub fn list_panels() -> Result<Vec<PanelInfo>> {
         Transport::list_panels()
     }
 }

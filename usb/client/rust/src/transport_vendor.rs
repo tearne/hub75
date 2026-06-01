@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use rusb::ffi as libusb;
 use rusb::UsbContext;
 
-use crate::{PanelInfo, USB_MANUFACTURER, USB_PID, USB_PRODUCT, USB_VID};
+use crate::{Error, PanelInfo, USB_MANUFACTURER, USB_PID, USB_PRODUCT, USB_VID};
 
 const BULK_OUT_ENDPOINT: u8 = 0x01;
 const BULK_IN_ENDPOINT: u8 = 0x81;
@@ -34,7 +34,7 @@ pub(crate) struct Transport {
 unsafe impl Send for Transport {}
 
 impl Transport {
-    pub(crate) fn open(serial: Option<&str>) -> Result<Self, Box<dyn std::error::Error>> {
+    pub(crate) fn open(serial: Option<&str>) -> crate::Result<Self> {
         let device = find_device(serial)?;
         let handle = device.open()?;
         let _ = handle.set_auto_detach_kernel_driver(true);
@@ -42,7 +42,7 @@ impl Transport {
 
         let transfer = unsafe { libusb::libusb_alloc_transfer(0) };
         if transfer.is_null() {
-            return Err("libusb_alloc_transfer returned null".into());
+            return Err(Error::Other("libusb_alloc_transfer returned null".into()));
         }
 
         Ok(Self {
@@ -52,7 +52,7 @@ impl Transport {
         })
     }
 
-    pub(crate) fn send_bytes(&mut self, buffer: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    pub(crate) fn send_bytes(&mut self, buffer: &[u8]) -> crate::Result<()> {
         let dev_handle = self.handle.as_raw();
         let ctx = self.handle.context().as_raw();
         let buf_ptr = buffer.as_ptr() as *mut u8;
@@ -75,17 +75,17 @@ impl Transport {
             );
             let r = libusb::libusb_submit_transfer(self.transfer);
             if r != 0 {
-                return Err(format!("libusb_submit_transfer failed: {r}").into());
+                return Err(map_libusb_error(r));
             }
             while self.completed.load(Ordering::Acquire) == 0 {
                 let r = libusb::libusb_handle_events_completed(ctx, completed_int);
                 if r != 0 {
-                    return Err(format!("libusb_handle_events_completed failed: {r}").into());
+                    return Err(map_libusb_error(r));
                 }
             }
             let status = (*self.transfer).status;
             if status != libusb::constants::LIBUSB_TRANSFER_COMPLETED {
-                return Err(format!("USB transfer status {status}").into());
+                return Err(map_transfer_status(status));
             }
         }
         Ok(())
@@ -94,17 +94,17 @@ impl Transport {
     pub(crate) fn recv_event(
         &mut self,
         timeout: std::time::Duration,
-    ) -> Result<Option<u8>, Box<dyn std::error::Error>> {
+    ) -> crate::Result<Option<u8>> {
         let mut buf = [0u8; 1];
         match self.handle.read_bulk(BULK_IN_ENDPOINT, &mut buf, timeout) {
             Ok(n) if n == 1 => Ok(Some(buf[0])),
             Ok(_) => Ok(None),
             Err(rusb::Error::Timeout) => Ok(None),
-            Err(e) => Err(Box::new(e)),
+            Err(e) => Err(e.into()),
         }
     }
 
-    pub(crate) fn list_panels() -> Result<Vec<PanelInfo>, Box<dyn std::error::Error>> {
+    pub(crate) fn list_panels() -> crate::Result<Vec<PanelInfo>> {
         let mut panels = Vec::new();
         for device in rusb::devices()?.iter() {
             let desc = match device.device_descriptor() {
@@ -157,9 +157,7 @@ extern "system" fn transfer_callback(transfer: *mut libusb::libusb_transfer) {
     }
 }
 
-fn find_device(
-    serial: Option<&str>,
-) -> Result<rusb::Device<rusb::GlobalContext>, Box<dyn std::error::Error>> {
+fn find_device(serial: Option<&str>) -> crate::Result<rusb::Device<rusb::GlobalContext>> {
     for device in rusb::devices()?.iter() {
         let desc = match device.device_descriptor() {
             Ok(d) => d,
@@ -189,19 +187,41 @@ fn find_device(
         }
         return Ok(device);
     }
-    match serial {
-        Some(want) => Err(format!(
-            "Could not find HUB75 display with serial {want:?} \
-             (looking for VID {:04x} / PID {:04x}, manufacturer={USB_MANUFACTURER:?}, \
-             product={USB_PRODUCT:?})",
-            USB_VID, USB_PID
-        )
-        .into()),
-        None => Err(format!(
-            "Could not find HUB75 display (looking for VID {:04x} / PID {:04x}, \
-             manufacturer={USB_MANUFACTURER:?}, product={USB_PRODUCT:?})",
-            USB_VID, USB_PID
-        )
-        .into()),
+    // No matching panel attached — a reconnectable condition, not a hard fault.
+    Err(Error::Disconnected)
+}
+
+impl From<rusb::Error> for Error {
+    fn from(error: rusb::Error) -> Self {
+        match error {
+            rusb::Error::NoDevice | rusb::Error::NotFound => Error::Disconnected,
+            rusb::Error::Timeout => Error::Timeout,
+            rusb::Error::Access => Error::PermissionDenied,
+            rusb::Error::Busy => Error::Busy,
+            other => Error::Other(format!("usb error: {other}")),
+        }
+    }
+}
+
+/// Map a libusb error code (a negative `LIBUSB_ERROR_*`) onto a client error.
+fn map_libusb_error(code: c_int) -> Error {
+    use libusb::constants::*;
+    match code {
+        LIBUSB_ERROR_NO_DEVICE => Error::Disconnected,
+        LIBUSB_ERROR_TIMEOUT => Error::Timeout,
+        LIBUSB_ERROR_ACCESS => Error::PermissionDenied,
+        LIBUSB_ERROR_BUSY => Error::Busy,
+        other => Error::Other(format!("libusb error {other}")),
+    }
+}
+
+/// Map an async-transfer completion status (`LIBUSB_TRANSFER_*`) onto a client error.
+fn map_transfer_status(status: c_int) -> Error {
+    use libusb::constants::*;
+    match status {
+        LIBUSB_TRANSFER_NO_DEVICE => Error::Disconnected,
+        LIBUSB_TRANSFER_TIMED_OUT => Error::Timeout,
+        LIBUSB_TRANSFER_STALL => Error::Other("usb transfer stalled".into()),
+        other => Error::Other(format!("usb transfer status {other}")),
     }
 }

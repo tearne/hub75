@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-use hub75_client::Hub75Client;
+use hub75_client::{Error as PanelError, Hub75Client};
 
 use crate::cpu::CpuSampler;
 use crate::presentation::{CORE_COUNT, LOGICAL_WIDTH};
@@ -100,41 +100,52 @@ fn main() -> Result<(), Box<dyn Error>> {
     loop {
         let cycle_start = Instant::now();
 
-        if panel.is_none() && cycle_start.duration_since(last_reconnect_attempt) >= RECONNECT_INTERVAL {
+        if disconnected_at.is_some()
+            && cycle_start.duration_since(last_reconnect_attempt) >= RECONNECT_INTERVAL
+        {
             last_reconnect_attempt = cycle_start;
-            match Hub75Client::open(Some(PANEL_SERIAL)) {
-                Ok(p) => {
-                    let downtime = disconnected_at
-                        .map(|t| cycle_start.duration_since(t))
-                        .unwrap_or_default();
-                    println!("panel reconnected after {:.1}s", downtime.as_secs_f64());
-                    panel = Some(p);
-                    disconnected_at = None;
-                    // Firmware sends button bytes only on state change;
-                    // it doesn't replay the current state on reconnect.
-                    // Resync the host view so any held button doesn't
-                    // register as a press edge on the next genuine
-                    // transition.
-                    last_button_state = 0;
-                }
-                Err(_) => {} // quiet — next attempt in RECONNECT_INTERVAL
+            // Reuse the existing client via reconnect() once we have one; only the
+            // very first connection (panel still None at startup) needs open().
+            let reconnected = match panel.as_mut() {
+                Some(p) => p.reconnect().is_ok(),
+                None => match Hub75Client::open(Some(PANEL_SERIAL)) {
+                    Ok(p) => {
+                        panel = Some(p);
+                        true
+                    }
+                    Err(_) => false, // quiet — next attempt in RECONNECT_INTERVAL
+                },
+            };
+            if reconnected {
+                let downtime = disconnected_at
+                    .map(|t| cycle_start.duration_since(t))
+                    .unwrap_or_default();
+                println!("panel reconnected after {:.1}s", downtime.as_secs_f64());
+                disconnected_at = None;
+                // Firmware sends button bytes only on state change; it doesn't
+                // replay the current state on reconnect. Resync the host view so a
+                // held button doesn't register as a press edge on the next genuine
+                // transition.
+                last_button_state = 0;
             }
         }
 
-        if let Some(p) = panel.as_mut() {
-            match drain_button_events(p, last_button_state) {
-                Ok((new_state, pressed_edges)) => {
-                    last_button_state = new_state;
-                    if pressed_edges & (1 << BUTTON_A_BIT) != 0 {
-                        let now_active = slates.toggle();
-                        println!("layout → {:?}", now_active);
+        if disconnected_at.is_none() {
+            if let Some(p) = panel.as_mut() {
+                match drain_button_events(p, last_button_state) {
+                    Ok((new_state, pressed_edges)) => {
+                        last_button_state = new_state;
+                        if pressed_edges & (1 << BUTTON_A_BIT) != 0 {
+                            let now_active = slates.toggle();
+                            println!("layout → {:?}", now_active);
+                        }
                     }
-                }
-                Err(e) => {
-                    eprintln!("panel disconnected: {e}");
-                    panel = None;
-                    disconnected_at = Some(cycle_start);
-                    last_reconnect_attempt = cycle_start;
+                    Err(PanelError::Disconnected) => {
+                        eprintln!("panel disconnected");
+                        disconnected_at = Some(cycle_start);
+                        last_reconnect_attempt = cycle_start;
+                    }
+                    Err(e) => eprintln!("panel button read error: {e}"),
                 }
             }
         }
@@ -151,13 +162,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         let elapsed_quarter_hours = elapsed_secs / 900;
         let shift = (initial_shift + elapsed_quarter_hours as usize) % LOGICAL_WIDTH;
 
-        if let Some(p) = panel.as_mut() {
-            let frame = renderer.render(slates.active(), shift, &PALETTE_A, ' ');
-            if let Err(e) = p.send_frame_rgb(frame) {
-                eprintln!("panel disconnected: {e}");
-                panel = None;
-                disconnected_at = Some(cycle_start);
-                last_reconnect_attempt = cycle_start;
+        if disconnected_at.is_none() {
+            if let Some(p) = panel.as_mut() {
+                let frame = renderer.render(slates.active(), shift, &PALETTE_A, ' ');
+                match p.send_frame_rgb(frame) {
+                    Ok(()) => {}
+                    Err(PanelError::Disconnected) => {
+                        eprintln!("panel disconnected");
+                        disconnected_at = Some(cycle_start);
+                        last_reconnect_attempt = cycle_start;
+                    }
+                    Err(e) => eprintln!("panel send error: {e}"),
+                }
             }
         }
         match cycle.checked_sub(cycle_start.elapsed()) {
@@ -222,7 +238,7 @@ fn adaptive_cycle(peak_busy: f32) -> Duration {
 fn drain_button_events(
     panel: &mut Hub75Client,
     prev_state: u8,
-) -> Result<(u8, u8), Box<dyn Error>> {
+) -> Result<(u8, u8), PanelError> {
     let mut state = prev_state;
     let mut pressed_edges = 0u8;
     loop {

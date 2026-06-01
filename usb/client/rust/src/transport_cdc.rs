@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use serialport::{SerialPort, SerialPortType};
 
-use crate::{PanelInfo, USB_PID, USB_VID};
+use crate::{Error, PanelInfo, USB_PID, USB_VID};
 
 /// Conservative CDC frame-rate ceiling. Set client-side so the
 /// firmware just consumes what arrives.
@@ -28,7 +28,7 @@ pub(crate) struct Transport {
 }
 
 impl Transport {
-    pub(crate) fn open(serial: Option<&str>) -> Result<Self, Box<dyn std::error::Error>> {
+    pub(crate) fn open(serial: Option<&str>) -> crate::Result<Self> {
         let port_name = find_port(serial)?;
         // Non-exclusive open so we coexist with anything else briefly
         // touching the port — notably ModemManager on Linux, which
@@ -45,7 +45,7 @@ impl Transport {
         })
     }
 
-    pub(crate) fn send_bytes(&mut self, buffer: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    pub(crate) fn send_bytes(&mut self, buffer: &[u8]) -> crate::Result<()> {
         // Enforce the rate cap before each send so callers don't have
         // to think about pacing.
         if let Some(last) = self.last_send {
@@ -59,10 +59,7 @@ impl Transport {
         Ok(())
     }
 
-    pub(crate) fn recv_event(
-        &mut self,
-        timeout: Duration,
-    ) -> Result<Option<u8>, Box<dyn std::error::Error>> {
+    pub(crate) fn recv_event(&mut self, timeout: Duration) -> crate::Result<Option<u8>> {
         self.port.set_timeout(timeout)?;
         let mut buf = [0u8; 1];
         let result = self.port.read(&mut buf);
@@ -73,11 +70,11 @@ impl Transport {
             Ok(1) => Ok(Some(buf[0])),
             Ok(_) => Ok(None),
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => Ok(None),
-            Err(e) => Err(Box::new(e)),
+            Err(e) => Err(e.into()),
         }
     }
 
-    pub(crate) fn list_panels() -> Result<Vec<PanelInfo>, Box<dyn std::error::Error>> {
+    pub(crate) fn list_panels() -> crate::Result<Vec<PanelInfo>> {
         let mut panels = Vec::new();
         for port in serialport::available_ports()? {
             if let SerialPortType::UsbPort(info) = &port.port_type {
@@ -95,7 +92,7 @@ impl Transport {
     }
 }
 
-fn find_port(serial: Option<&str>) -> Result<String, Box<dyn std::error::Error>> {
+fn find_port(serial: Option<&str>) -> crate::Result<String> {
     for port in serialport::available_ports()? {
         if let SerialPortType::UsbPort(info) = &port.port_type {
             if info.vid != USB_VID || info.pid != USB_PID {
@@ -110,18 +107,38 @@ fn find_port(serial: Option<&str>) -> Result<String, Box<dyn std::error::Error>>
             return Ok(port.port_name);
         }
     }
-    match serial {
-        Some(want) => Err(format!(
-            "Could not find HUB75 CDC panel with serial {want:?} \
-             (looking for VID {:04x} / PID {:04x})",
-            USB_VID, USB_PID
-        )
-        .into()),
-        None => Err(format!(
-            "Could not find HUB75 CDC panel \
-             (looking for VID {:04x} / PID {:04x})",
-            USB_VID, USB_PID
-        )
-        .into()),
+    // No matching panel enumerated — a reconnectable condition, not a hard fault.
+    Err(Error::Disconnected)
+}
+
+/// Map a `std::io::ErrorKind` (from a read/write on the port) onto a client error.
+/// `describe` builds the fallback message only when no specific variant fits.
+fn map_io_kind(kind: std::io::ErrorKind, describe: impl FnOnce() -> String) -> Error {
+    use std::io::ErrorKind::*;
+    match kind {
+        BrokenPipe | NotFound | NotConnected | UnexpectedEof => Error::Disconnected,
+        TimedOut => Error::Timeout,
+        PermissionDenied => Error::PermissionDenied,
+        _ => Error::Other(describe()),
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(error: std::io::Error) -> Self {
+        let kind = error.kind();
+        map_io_kind(kind, || format!("io error: {error}"))
+    }
+}
+
+impl From<serialport::Error> for Error {
+    fn from(error: serialport::Error) -> Self {
+        match error.kind {
+            // serialport reports a disconnected (or busy) device as NoDevice.
+            serialport::ErrorKind::NoDevice => Error::Disconnected,
+            serialport::ErrorKind::Io(kind) => {
+                map_io_kind(kind, || format!("serial io error: {}", error.description))
+            }
+            _ => Error::Other(format!("serial error: {}", error.description)),
+        }
     }
 }

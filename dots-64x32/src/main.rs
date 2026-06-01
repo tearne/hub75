@@ -9,7 +9,7 @@
 //! If the panel is unplugged it waits and reconnects rather than exiting, so it can be
 //! left running on a desk.
 
-use hub75_client::Hub75Client;
+use hub75_client::{Error, Hub75Client};
 use rand::Rng;
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -27,12 +27,14 @@ fn make_random_dot() -> (usize, usize, [u8; 3]) {
     (x, y, rgb)
 }
 
-/// Open the first panel, retrying once a second until one is plugged in.
+/// Open the first panel, retrying once a second while none is present. A non-disconnect
+/// error (e.g. a permissions problem) is fatal — there's nothing to wait for.
 fn connect_panel() -> Hub75Client {
     loop {
         match Hub75Client::open(None) {
             Ok(client) => return client,
-            Err(_) => std::thread::sleep(Duration::from_secs(1)),
+            Err(Error::Disconnected) => std::thread::sleep(Duration::from_secs(1)),
+            Err(e) => panic!("cannot open panel: {e}"),
         }
     }
 }
@@ -55,12 +57,19 @@ fn main() {
             frame[y * WIDTH + x] = rgb;
         }
 
-        // If the panel was unplugged the send fails with a broken pipe; wait for it to
-        // come back and carry on, rather than crashing out and needing a re-run.
-        if client.send_frame_rgb(&frame).is_err() {
-            eprintln!("panel disconnected — waiting for it to come back…");
-            client = connect_panel();
-            eprintln!("panel reconnected.");
+        // Only `Disconnected` is worth recovering from — reconnect and carry on. Any
+        // other error (e.g. a wrong-sized frame, which is a bug) should surface loudly
+        // rather than be silently retried.
+        match client.send_frame_rgb(&frame) {
+            Ok(()) => {}
+            Err(Error::Disconnected) => {
+                eprintln!("panel disconnected — waiting for it to come back…");
+                while client.reconnect().is_err() {
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+                eprintln!("panel reconnected.");
+            }
+            Err(e) => panic!("send failed: {e}"),
         }
 
         std::thread::sleep(Duration::from_millis(500));

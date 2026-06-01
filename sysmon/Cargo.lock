@@ -90,7 +90,7 @@ dependencies = [
 
 [[package]]
 name = "hub75-client"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "chrono",
  "rusb",
@@ -242,7 +242,7 @@ dependencies = [
 
 [[package]]
 name = "sysmon"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "hub75-client",
 ]
