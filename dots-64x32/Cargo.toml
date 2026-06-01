@@ -10,3 +10,7 @@ description = "Minimal reference example: random dots on a 64x32 HUB75 panel ove
 # .exe distributable (see README).
 hub75-client = { path = "../usb/client/rust", default-features = false, features = ["panel-64x32", "transport-cdc"] }
 rand = "0.9"
+
+[profile.release]
+opt-level = 3
+lto = true

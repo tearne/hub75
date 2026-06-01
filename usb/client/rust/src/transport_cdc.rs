@@ -30,15 +30,16 @@ pub(crate) struct Transport {
 impl Transport {
     pub(crate) fn open(serial: Option<&str>) -> crate::Result<Self> {
         let port_name = find_port(serial)?;
-        // Non-exclusive open so we coexist with anything else briefly
-        // touching the port — notably ModemManager on Linux, which
-        // probes every new /dev/ttyACM* and would otherwise block us
-        // with a transient exclusive lock. pyserial defaults to
-        // non-exclusive; match it.
-        let port = serialport::new(&port_name, 115_200)
-            .timeout(WRITE_TIMEOUT)
-            .exclusive(false)
-            .open()?;
+        // Non-exclusive open on Unix so we coexist with anything else
+        // briefly touching the port — notably ModemManager on Linux,
+        // which probes every new /dev/ttyACM* and would otherwise
+        // block us with a transient exclusive lock. pyserial defaults
+        // to non-exclusive; match it. On Windows the concept doesn't
+        // apply and the builder doesn't expose `.exclusive()`.
+        let builder = serialport::new(&port_name, 115_200).timeout(WRITE_TIMEOUT);
+        #[cfg(unix)]
+        let builder = builder.exclusive(false);
+        let port = builder.open()?;
         Ok(Self {
             port,
             last_send: None,
