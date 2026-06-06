@@ -6,8 +6,9 @@
 //! just an example of *what* to put in the array.
 //!
 //! This one keeps the last 20 random dots on screen, adding a fresh one twice a second.
-//! If the panel is unplugged it logs the event, waits, and reconnects rather than
-//! exiting, so it can be left running on a desk.
+//! Press button A to run a panel bring-up test: the whole panel goes pure red, green,
+//! then blue for a second each, then the dots resume. If the panel is unplugged it logs
+//! the event, waits, and reconnects rather than exiting, so it can be left on a desk.
 
 use hub75_client::{Error, Hub75Client};
 use rand::Rng;
@@ -17,6 +18,9 @@ use std::time::Duration;
 const WIDTH: usize = 64;
 const HEIGHT: usize = 32;
 const DOT_COUNT: usize = 20;
+
+/// Bit 0 of the firmware's packed button byte is button A (see `usb/README.md`).
+const BUTTON_A_BIT: u8 = 0;
 
 /// Pick a dot at a random position with a random colour: `(x, y, [r, g, b])`.
 fn make_random_dot() -> (usize, usize, [u8; 3]) {
@@ -58,20 +62,64 @@ fn wait_for_panel(client: &mut Hub75Client) {
     println!("panel reconnected.");
 }
 
+/// Send one frame, recovering transparently if the panel was unplugged so the program
+/// keeps running. Any error other than `Disconnected` is unexpected on a desk demo, so
+/// it's logged before we wait and reconnect rather than swallowed silently.
+fn show(client: &mut Hub75Client, frame: &[[u8; 3]]) {
+    match client.send_frame_rgb(frame) {
+        Ok(()) => {}
+        Err(Error::Disconnected) => wait_for_panel(client),
+        Err(other) => {
+            eprintln!("unexpected send error: {other:?} — trying to reconnect");
+            wait_for_panel(client);
+        }
+    }
+}
+
+/// Drain pending button events and report whether button A was *newly* pressed (a 0→1
+/// edge). The firmware sends a byte only when the button state changes, so most calls
+/// just return false. A 1 ms timeout keeps this effectively non-blocking.
+fn button_a_pressed(client: &mut Hub75Client, last_state: &mut u8) -> bool {
+    let mut pressed = false;
+    while let Ok(Some(byte)) = client.recv_event(Duration::from_millis(1)) {
+        let newly_pressed = byte & !*last_state;
+        *last_state = byte;
+        if newly_pressed & (1 << BUTTON_A_BIT) != 0 {
+            pressed = true;
+        }
+    }
+    pressed
+}
+
+/// Fill the whole panel pure red, then green, then blue — one second each — as a quick
+/// visual check that every pixel lights and each colour channel is wired correctly.
+fn run_rgb_test(client: &mut Hub75Client) {
+    println!("RGB test: red, green, blue (1s each)");
+    for colour in [[255, 0, 0], [0, 255, 0], [0, 0, 255]] {
+        show(client, &[colour; WIDTH * HEIGHT]);
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
 fn main() {
     // Label the terminal window (OSC title — honoured by Windows Terminal and most
     // modern terminals, ignored elsewhere) and print a banner, so the console isn't a
     // blank mystery window. The version comes from Cargo at build time.
     let version = env!("CARGO_PKG_VERSION");
     print!("\x1b]0;dots-64x32 v{version} — HUB75 panel demo\x07");
-    println!("dots-64x32 v{version}: streaming random dots to a 64x32 panel. Ctrl+C to quit.");
+    println!("dots-64x32 v{version}: streaming random dots to a 64x32 panel. Press A for an RGB test. Ctrl+C to quit.");
 
     let mut client = connect_panel();
 
     // The dots currently on screen, oldest at the front so it falls off first.
     let mut dots: VecDeque<(usize, usize, [u8; 3])> = VecDeque::with_capacity(DOT_COUNT);
+    let mut button_state = 0u8;
 
     loop {
+        if button_a_pressed(&mut client, &mut button_state) {
+            run_rgb_test(&mut client);
+        }
+
         dots.push_back(make_random_dot());
         if dots.len() > DOT_COUNT {
             dots.pop_front();
@@ -82,20 +130,7 @@ fn main() {
         for &(x, y, rgb) in &dots {
             frame[y * WIDTH + x] = rgb;
         }
-
-        match client.send_frame_rgb(&frame) {
-            Ok(()) => {}
-            // The expected recoverable case: the panel went away.
-            Err(Error::Disconnected) => wait_for_panel(&mut client),
-            // Anything else is unexpected on a desk demo. Log exactly what it was — this
-            // is how we'd spot a host (e.g. Windows) reporting an unplug as something
-            // other than `Disconnected` — but keep running and try to recover rather
-            // than exiting and closing the window.
-            Err(other) => {
-                eprintln!("unexpected send error: {other:?} — trying to reconnect");
-                wait_for_panel(&mut client);
-            }
-        }
+        show(&mut client, &frame);
 
         std::thread::sleep(Duration::from_millis(500));
     }
