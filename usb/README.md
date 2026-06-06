@@ -17,6 +17,8 @@ The two USB classes are mutually exclusive at compile time — the firmware adve
 - **PID:** `0x7575`
 - **Strings:** `manufacturer = "tearne"`, `product = "hub75"`, `serial_number = "001"` (or per-board `PANEL_NAME`/chip-ID)
 
+Build any firmware with `OWNER_TAG=<string>` to stamp a free-form owner/contact tag (email, name, asset tag…) into the product string — it becomes `hub75 (<tag>)`, visible in `lsusb -v`. The `hub75` prefix is preserved so clients still recognise the panel; serial-number targeting is unaffected. Example: `OWNER_TAG="joe@example.com" cargo run --release --features panel-shift-64x32`.
+
 Vendor-class build:
 - **Class:** vendor-specific (`0xFF`)
 - **Endpoints:** one bulk OUT for pixel frames (`0x01`), one bulk IN for button events (`0x81`)
@@ -145,7 +147,7 @@ Each frame is a single transfer (bulk OUT for vendor class, serial write for CDC
 | Sequence | 1 byte | Wrapping counter (0–255) for dropped-frame detection |
 | Pixels | `WIDTH × HEIGHT × 3` bytes | RGB, row-major, top-left origin (e.g. 6,144 bytes for 64×32, 12,288 bytes for 64×64) |
 
-The client matches the device by VID/PID (`0x1209:0x7575`). The vendor client also sanity-checks the manufacturer/product strings (`tearne`/`hub75`); the CDC client matches on VID/PID alone.
+The client matches the device by VID/PID (`0x1209:0x7575`). The vendor client also sanity-checks the manufacturer string (`tearne`) and the product-string prefix (`hub75`, so an `OWNER_TAG` suffix still validates); the CDC client matches on VID/PID alone.
 
 ### Button events
 

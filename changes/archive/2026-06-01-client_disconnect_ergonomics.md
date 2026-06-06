@@ -67,3 +67,9 @@ Update `dots-64x32` and `sysmon` to the new API: use `reconnect()` instead of re
 - Windows diagnostic captured: an unplug-mid-send surfaces as `Other("io error: A device attached to the system is not functioning. (os error 31)")` — Windows `ERROR_GEN_FAILURE`, which std maps to an uncategorised `ErrorKind`, so kind-matching missed it.
 - Fixed at source (client 0.7.1): `From<std::io::Error>` now checks `raw_os_error()` for Windows device-removal codes (31, plus 1167/22) and returns `Error::Disconnected`. Windows-gated via `#[cfg(windows)]` — the same integers are unrelated errno values on Unix. Verified with `cargo check --target x86_64-pc-windows-gnu` (compiles the gated branch without needing the mingw linker). Now a Windows CDC unplug takes the clean `Disconnected` path for every consumer (dots and sysmon-on-Windows), with the example's catch-all remaining as a safety net for any code not yet listed.
 - dots 0.1.7: startup banner and window title now include the crate version via `env!("CARGO_PKG_VERSION")`, so it tracks `Cargo.toml` automatically.
+
+## Conclusion
+
+Completed and hardware-confirmed — sysmon (vendor) on Linux, dots (CDC) on Windows 11 including unplug/replug. Final versions: `hub75-client` 0.7.1, `dots-64x32` 0.1.7, `sysmon` 0.7.8.
+
+Key deviation: hardware testing revealed Windows reports a CDC unplug as `ERROR_GEN_FAILURE` (os error 31), which std leaves uncategorised — so the CDC `Disconnected` mapping had to match raw OS codes under `#[cfg(windows)]`, not just `ErrorKind`. A collaborator's parallel dots implementation also merged in mid-change, resolved toward our reconnect-capable version (keeping their `[profile.release]` block). No `map.md` or project changelog to update.

@@ -64,6 +64,11 @@ pub const USB_PID: u16 = 0x7575;
 /// USB Full-Speed bulk endpoint max packet size.
 pub const BULK_MAX_PACKET: u16 = 64;
 
+/// USB product string, baked at build time from `OWNER_TAG` (see `build.rs`):
+/// `hub75` by default, `hub75 (<tag>)` when a tag is set. Clients recognise the
+/// panel by the `hub75` prefix, so the prefix must not change.
+pub const PRODUCT: &str = env!("USB_PRODUCT_STRING");
+
 /// Per-product configuration the binary supplies.
 pub struct FirmwareConfig {
     /// USB serial number string. Bake an identifier per product

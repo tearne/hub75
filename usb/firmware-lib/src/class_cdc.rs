@@ -25,7 +25,7 @@ pub async fn run_usb_and_buttons<D: Driver<'static>>(
 ) {
     let mut usb_config = embassy_usb::Config::new(USB_VID, USB_PID);
     usb_config.manufacturer = Some("tearne");
-    usb_config.product = Some("hub75");
+    usb_config.product = Some(crate::PRODUCT);
     usb_config.serial_number = Some(config.serial_number);
     usb_config.max_power = 100;
     usb_config.max_packet_size_0 = 64;

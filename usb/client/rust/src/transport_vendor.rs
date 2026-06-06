@@ -122,7 +122,7 @@ impl Transport {
                 .read_manufacturer_string_ascii(&desc)
                 .unwrap_or_default();
             let product = handle.read_product_string_ascii(&desc).unwrap_or_default();
-            if manufacturer != USB_MANUFACTURER || product != USB_PRODUCT {
+            if manufacturer != USB_MANUFACTURER || !product.starts_with(USB_PRODUCT) {
                 continue;
             }
             let serial = handle
@@ -174,7 +174,7 @@ fn find_device(serial: Option<&str>) -> crate::Result<rusb::Device<rusb::GlobalC
             .read_manufacturer_string_ascii(&desc)
             .unwrap_or_default();
         let product = handle.read_product_string_ascii(&desc).unwrap_or_default();
-        if manufacturer != USB_MANUFACTURER || product != USB_PRODUCT {
+        if manufacturer != USB_MANUFACTURER || !product.starts_with(USB_PRODUCT) {
             continue;
         }
         if let Some(want) = serial {
