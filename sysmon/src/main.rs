@@ -4,6 +4,7 @@
 
 mod bands;
 mod cpu;
+mod demo;
 mod display;
 mod oklch;
 mod presentation;
@@ -20,16 +21,21 @@ use std::time::{Duration, Instant, SystemTime};
 use hub75_client::{Error as PanelError, Hub75Client};
 
 use crate::cpu::CpuSampler;
+use crate::demo::{DemoEngine, DemoSample};
 use crate::presentation::{CORE_COUNT, LOGICAL_WIDTH};
 use crate::projection::{PALETTE_A, Renderer};
 use crate::ram::RamSampler;
 use crate::slate::{LayoutMode, Slates};
 use crate::throughput::{ThroughputSampler, disk_sampler, net_sampler};
 
-/// Bit position of button A in the packed button-state byte the
-/// firmware sends over the bulk IN endpoint (see `usb/README.md`).
-/// Button B is currently unused by sysmon.
+/// Bit positions in the packed button-state byte the firmware sends
+/// over the bulk IN endpoint (see `usb/README.md`).
 const BUTTON_A_BIT: u8 = 0;
+const BUTTON_B_BIT: u8 = 1;
+
+/// How long button-B demo mode runs before handing back to the live
+/// samplers. A re-press during demo cancels immediately.
+const DEMO_DURATION: Duration = Duration::from_secs(600);
 
 /// Adaptive frame rate bounds when `-f` is not passed: cycle duration
 /// scales with peak CPU busy, fastest at full load, slowest at idle.
@@ -97,6 +103,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut smoothed_busy: f32 = 1.0;
     let mut last_sample_at: Option<Instant> = None;
     let mut last_button_state: u8 = 0;
+    let mut demo: Option<(Instant, DemoEngine)> = None;
     loop {
         let cycle_start = Instant::now();
 
@@ -139,6 +146,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                             let now_active = slates.toggle();
                             println!("layout → {:?}", now_active);
                         }
+                        if pressed_edges & (1 << BUTTON_B_BIT) != 0 {
+                            if demo.is_some() {
+                                demo = None;
+                                println!("demo mode → off");
+                            } else {
+                                demo = Some((cycle_start, DemoEngine::new()));
+                                println!(
+                                    "demo mode → on ({} s)",
+                                    DEMO_DURATION.as_secs()
+                                );
+                            }
+                        }
                     }
                     Err(PanelError::Disconnected) => {
                         eprintln!("panel disconnected");
@@ -150,11 +169,28 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
 
-        sample_all(&mut cpu, &ram, &mut disk, &mut net, &mut slates, &mut peak_busy);
         let dt_secs = last_sample_at
             .map(|t| cycle_start.duration_since(t).as_secs_f64())
             .unwrap_or(0.0);
         last_sample_at = Some(cycle_start);
+        if let Some((started_at, _)) = &demo {
+            if cycle_start.duration_since(*started_at) >= DEMO_DURATION {
+                demo = None;
+                println!("demo mode → off (timeout)");
+            }
+        }
+        let demo_sample = demo
+            .as_mut()
+            .map(|(_, engine)| engine.step(dt_secs as f32));
+        sample_all(
+            &mut cpu,
+            &ram,
+            &mut disk,
+            &mut net,
+            &mut slates,
+            &mut peak_busy,
+            demo_sample.as_ref(),
+        );
         let alpha = 1.0 - (-dt_secs / ADAPTIVE_TAU_SECS).exp();
         smoothed_busy += (alpha as f32) * (peak_busy - smoothed_busy);
         let cycle = fixed_cycle.unwrap_or_else(|| adaptive_cycle(smoothed_busy));
@@ -164,7 +200,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         if disconnected_at.is_none() {
             if let Some(p) = panel.as_mut() {
-                let frame = renderer.render(slates.active(), shift, &PALETTE_A, ' ');
+                let frame = renderer.render(
+                    slates.active(),
+                    shift,
+                    &PALETTE_A,
+                    ' ',
+                    demo.is_some(),
+                );
                 match p.send_frame_rgb(frame) {
                     Ok(()) => {}
                     Err(PanelError::Disconnected) => {
@@ -277,8 +319,33 @@ fn sample_all(
     net: &mut ThroughputSampler,
     slates: &mut Slates,
     peak_busy: &mut f32,
+    demo_sample: Option<&DemoSample>,
 ) {
-    match cpu.sample() {
+    // Always call the real samplers — they carry differencing state.
+    // In demo mode the readings are discarded so the first reading
+    // after demo ends doesn't surface as a giant delta.
+    let cpu_real = cpu.sample();
+    let ram_real = ram.sample();
+    let now = Instant::now();
+    let disk_real = disk.sample(now);
+    let net_real = net.sample(now);
+
+    if let Some(d) = demo_sample {
+        for slate in slates.each_mut() {
+            for core_idx in 0..CORE_COUNT {
+                slate.cpu[core_idx].push_sample(d.cpu[core_idx]);
+            }
+            slate.ram.push_sample(d.ram);
+            slate.disk_read.push_sample(d.disk_read);
+            slate.disk_write.push_sample(d.disk_write);
+            slate.net_down.push_sample(d.net_down);
+            slate.net_up.push_sample(d.net_up);
+        }
+        *peak_busy = d.peak_busy;
+        return;
+    }
+
+    match cpu_real {
         Ok(busy) => {
             let mut peak: f32 = 0.0;
             for slate in slates.each_mut() {
@@ -295,7 +362,7 @@ fn sample_all(
         }
         Err(e) => eprintln!("CPU sample failed: {e}"),
     }
-    match ram.sample() {
+    match ram_real {
         Ok(used) => {
             for slate in slates.each_mut() {
                 slate.ram.push_sample(used);
@@ -303,8 +370,7 @@ fn sample_all(
         }
         Err(e) => eprintln!("RAM sample failed: {e}"),
     }
-    let now = Instant::now();
-    match disk.sample(now) {
+    match disk_real {
         Ok((read_frac, write_frac)) => {
             // For palette tuning without real disk activity, swap
             // `read_frac` for `synthetic_fraction(now)` to inject a
@@ -316,7 +382,7 @@ fn sample_all(
         }
         Err(e) => eprintln!("Disk sample failed: {e}"),
     }
-    match net.sample(now) {
+    match net_real {
         Ok((rx_frac, tx_frac)) => {
             for slate in slates.each_mut() {
                 slate.net_down.push_sample(rx_frac);

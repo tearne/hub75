@@ -110,6 +110,7 @@ impl Renderer {
         shift: usize,
         palette: &[Pixel; 6],
         label: char,
+        demo_marker: bool,
     ) -> &[Pixel] {
         self.canvas.fill([0u8; 3]);
 
@@ -125,6 +126,11 @@ impl Renderer {
 
         crate::display::shift_and_rotate(&self.canvas, &mut self.frame, shift);
         draw_label_on_frame(&mut self.frame, label);
+        if demo_marker {
+            // User-view bottom-left corner pixel (= panel native (0, 0)),
+            // signalling synthetic activity during a button-B demo.
+            self.frame[0] = [255, 255, 255];
+        }
         &self.frame
     }
 }

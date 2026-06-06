@@ -1,6 +1,6 @@
 # sysmon
 
-System monitor for a HUB75 LED panel. Renders host CPU (per-core), RAM, Disk I/O, and Network throughput onto a 64×32 panel via a Raspberry Pi Pico running the [`usb`](../usb/) firmware (vendor-class build). Installs as a `systemd` service that auto-starts on boot.
+System monitor for a HUB75 LED panel. Renders host CPU (per-core), RAM, Disk I/O, and Network throughput onto a 64×32 panel via a Raspberry Pi Pico running the dedicated `sysmon-firmware` (built on the [`usb`](../usb/) firmware-lib). Installs as a `systemd` service that auto-starts on boot.
 
 ## Hardware compatibility
 
